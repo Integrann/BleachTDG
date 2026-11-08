@@ -1,0 +1,1918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bleach vs Naruto 2.6 — Online PvP</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #08090f;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+        }
+
+        /* ── Header ────────────────────────────────────── */
+        .header {
+            width: 100%;
+            background: linear-gradient(135deg, #160829 0%, #0d1b2a 50%, #160829 100%);
+            border-bottom: 3px solid #f39c12;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .header-title {
+            font-size: 1.65rem;
+            font-weight: 900;
+            background: linear-gradient(to right, #ff4e50, #f9d423, #ff4e50);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: .85rem;
+            color: #aaa;
+            background: rgba(255,255,255,.04);
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid #2a2a3a;
+        }
+
+        .connection-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .connection-dot.connected { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+        .connection-dot.disconnected { background: #e74c3c; box-shadow: 0 0 8px #e74c3c; }
+        .connection-dot.connecting { background: #f39c12; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+        /* ── Lobby Screen ──────────────────────────────── */
+        .lobby {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 25px 20px;
+            width: 100%;
+            max-width: 900px;
+        }
+        .lobby.hidden { display: none; }
+
+        .mode-tabs {
+            display: flex;
+            margin-bottom: 22px;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid #333;
+            background: #12131f;
+        }
+        .mode-tab {
+            padding: 12px 28px;
+            background: transparent;
+            color: #888;
+            cursor: pointer;
+            font-size: .95rem;
+            font-weight: 700;
+            transition: all .2s;
+            border: none;
+        }
+        .mode-tab:hover { color: #fff; background: rgba(255,255,255,.04); }
+        .mode-tab.active {
+            background: linear-gradient(180deg, #f39c12, #d35400);
+            color: #fff;
+        }
+
+        .nickname-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
+            background: #121526;
+            border: 1px solid #2a2f4a;
+            padding: 8px 16px;
+            border-radius: 8px;
+        }
+        .nickname-bar label { color: #99a; font-size: .85rem; font-weight: 600; }
+        .nickname-bar input {
+            background: #0a0c16;
+            border: 1px solid #333;
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 5px;
+            font-size: .9rem;
+            font-weight: 600;
+            width: 160px;
+        }
+        .nickname-bar input:focus { outline: none; border-color: #f39c12; }
+
+        .lobby-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+            width: 100%;
+        }
+
+        .lobby-card {
+            background: linear-gradient(180deg, #15192b, #0f1322);
+            border: 1px solid #28304d;
+            border-radius: 12px;
+            padding: 22px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        .lobby-card.full-width {
+            grid-column: 1 / -1;
+        }
+        .lobby-card h3 {
+            font-size: 1.15rem;
+            margin-bottom: 8px;
+            color: #f39c12;
+        }
+        .lobby-card p {
+            color: #8a94ad;
+            font-size: .85rem;
+            margin-bottom: 16px;
+        }
+
+        .btn-primary {
+            padding: 11px 26px;
+            background: linear-gradient(180deg, #f39c12, #d35400);
+            color: #fff;
+            border: none;
+            border-radius: 7px;
+            font-size: .95rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all .2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(243,156,18,.35); }
+        .btn-primary:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+        .btn-quick {
+            padding: 13px 34px;
+            background: linear-gradient(180deg, #e74c3c, #c0392b);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.05rem;
+            font-weight: 800;
+            cursor: pointer;
+            transition: all .2s;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+        .btn-quick:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(231,76,60,.45); }
+
+        .btn-secondary {
+            padding: 8px 18px;
+            background: #1d2238;
+            color: #cdd6f4;
+            border: 1px solid #384166;
+            border-radius: 6px;
+            font-size: .84rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .2s;
+        }
+        .btn-secondary:hover { border-color: #f39c12; color: #f39c12; }
+
+        .btn-danger {
+            padding: 7px 16px;
+            background: linear-gradient(180deg, #c0392b, #96281b);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: .82rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+        }
+        .input-group input {
+            padding: 10px 14px;
+            background: #0a0c16;
+            border: 2px solid #2e3654;
+            border-radius: 7px;
+            color: #f39c12;
+            font-size: 1.25rem;
+            font-weight: 800;
+            text-align: center;
+            width: 165px;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+            font-family: 'Courier New', monospace;
+        }
+        .input-group input:focus { outline: none; border-color: #f39c12; }
+
+        /* Room code display */
+        .room-code-display {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 16px;
+            width: 100%;
+        }
+        .room-code-display.visible { display: flex; }
+
+        .room-code {
+            font-size: 2.1rem;
+            font-weight: 900;
+            color: #f39c12;
+            letter-spacing: 8px;
+            font-family: 'Courier New', monospace;
+            background: #090b14;
+            padding: 10px 24px;
+            border-radius: 8px;
+            border: 2px dashed #f39c12;
+            cursor: pointer;
+            position: relative;
+        }
+        .copy-tooltip {
+            position: absolute;
+            top: -30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #27ae60;
+            color: #fff;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: .75rem;
+            opacity: 0;
+            transition: opacity .25s;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .copy-tooltip.show { opacity: 1; }
+
+        .share-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        /* Open Rooms List */
+        .rooms-list {
+            width: 100%;
+            max-height: 170px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 6px;
+        }
+        .room-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #0b0e1a;
+            border: 1px solid #252c47;
+            padding: 10px 16px;
+            border-radius: 8px;
+        }
+        .room-item-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: .9rem;
+        }
+        .room-badge {
+            font-family: monospace;
+            font-weight: 800;
+            color: #f39c12;
+            background: rgba(243,156,18,.12);
+            padding: 3px 8px;
+            border-radius: 5px;
+            letter-spacing: 2px;
+        }
+
+        /* ── Status Bar ────────────────────────────────── */
+        .status-bar {
+            width: 100%;
+            max-width: 900px;
+            text-align: center;
+            padding: 6px 20px;
+            display: none;
+        }
+        .status-bar.visible { display: block; }
+        .status-msg {
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-size: .9rem;
+            font-weight: 600;
+        }
+        .status-msg.info { background: #162c46; color: #68b5f5; border: 1px solid #26619c; }
+        .status-msg.success { background: #143622; color: #58d68d; border: 1px solid #27ae60; }
+        .status-msg.error { background: #3b1719; color: #f17a72; border: 1px solid #c0392b; }
+        .status-msg.waiting { background: #382e14; color: #f9e79f; border: 1px solid #f39c12; }
+
+        /* ── Game Screen ───────────────────────────────── */
+        .game-screen {
+            display: none;
+            width: 100%;
+            max-width: 1240px;
+            padding: 10px 16px 24px;
+            flex-direction: column;
+            align-items: center;
+        }
+        .game-screen.visible { display: flex; }
+
+        .pvp-guide-banner {
+            width: 100%;
+            background: linear-gradient(90deg, #1b2845, #2b193d, #1b2845);
+            border: 1px solid #f39c12;
+            border-radius: 8px;
+            padding: 9px 16px;
+            margin-bottom: 8px;
+            font-size: .85rem;
+            color: #f8e5b5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .pvp-guide-banner strong { color: #f39c12; }
+
+        .game-top-bar {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 16px;
+            background: #121524;
+            border-radius: 8px 8px 0 0;
+            border: 1px solid #2b3252;
+            border-bottom: none;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .room-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: .86rem;
+            color: #a5b1cc;
+            flex-wrap: wrap;
+        }
+        .room-info strong { color: #f39c12; }
+
+        .stream-badge {
+            font-size: .75rem;
+            padding: 2px 9px;
+            border-radius: 12px;
+            font-weight: 700;
+            background: #1e293b;
+            color: #94a3b8;
+            border: 1px solid #334155;
+        }
+        .stream-badge.webrtc { background: #0f3923; color: #4ade80; border-color: #16a34a; }
+        .stream-badge.relay { background: #3b2a10; color: #facc15; border-color: #ca8a04; }
+
+        .ping { font-size: .82rem; font-weight: 700; color: #888; }
+        .ping.good { color: #2ecc71; }
+        .ping.medium { color: #f39c12; }
+        .ping.bad { color: #e74c3c; }
+
+        /* Main Arena Layout */
+        .arena-layout {
+            width: 100%;
+            display: grid;
+            grid-template-columns: 1fr 270px;
+            gap: 12px;
+            align-items: start;
+        }
+        .arena-layout.no-sidebar {
+            grid-template-columns: 1fr;
+        }
+
+        .game-container {
+            width: 100%;
+            aspect-ratio: 4 / 3;
+            background: #000;
+            border: 3px solid #2b3252;
+            border-radius: 0 0 8px 8px;
+            overflow: hidden;
+            box-shadow: 0 0 35px rgba(243,156,18,.12);
+            position: relative;
+        }
+        .game-container ruffle-player,
+        .game-container video,
+        .game-container img#fallbackStreamImg {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+            background: #000;
+        }
+
+        .pvp-overlay {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(8,9,15,.92);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            transition: opacity .35s;
+            padding: 20px;
+            text-align: center;
+        }
+        .pvp-overlay.hidden { opacity: 0; pointer-events: none; }
+
+        .spinner {
+            width: 46px; height: 46px;
+            border: 4px solid #2b3252;
+            border-top-color: #f39c12;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .overlay-text {
+            margin-top: 14px;
+            color: #cbd5e1;
+            font-size: .95rem;
+            font-weight: 600;
+        }
+
+        /* Sidebar: Live Input HUD + Chat */
+        .arena-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            height: 100%;
+        }
+
+        .hud-card {
+            background: #121524;
+            border: 1px solid #2b3252;
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .hud-card h4 {
+            font-size: .82rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #94a3b8;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #222842;
+            padding-bottom: 5px;
+        }
+
+        .pad-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 4px;
+            margin-bottom: 8px;
+        }
+        .pad-key {
+            background: #1a1f35;
+            border: 1px solid #2f385c;
+            border-radius: 4px;
+            padding: 5px 2px;
+            text-align: center;
+            font-size: .7rem;
+            font-weight: 700;
+            color: #7c86a6;
+            transition: all .06s;
+        }
+        .pad-key.active-p1 {
+            background: #e74c3c;
+            color: #fff;
+            border-color: #ff7979;
+            box-shadow: 0 0 8px rgba(231,76,60,.7);
+        }
+        .pad-key.active-p2 {
+            background: #3498db;
+            color: #fff;
+            border-color: #74b9ff;
+            box-shadow: 0 0 8px rgba(52,152,219,.7);
+        }
+
+        /* Chat Box */
+        .chat-messages {
+            height: 180px;
+            overflow-y: auto;
+            background: #0a0c16;
+            border: 1px solid #222842;
+            border-radius: 6px;
+            padding: 8px;
+            font-size: .8rem;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            margin-bottom: 8px;
+        }
+        .chat-line { word-break: break-word; line-height: 1.35; }
+        .chat-line .p1-name { color: #ff6b6b; font-weight: 700; }
+        .chat-line .p2-name { color: #4dabf7; font-weight: 700; }
+        .chat-line .sys-msg { color: #f39c12; font-style: italic; }
+
+        .chat-input-row {
+            display: flex;
+            gap: 6px;
+        }
+        .chat-input-row input {
+            flex: 1;
+            background: #0a0c16;
+            border: 1px solid #2e3654;
+            color: #fff;
+            padding: 6px 10px;
+            border-radius: 5px;
+            font-size: .82rem;
+        }
+        .chat-input-row input:focus { outline: none; border-color: #f39c12; }
+
+        /* Controls Bar & Reference */
+        .controls-bar {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .controls-info {
+            width: 100%;
+            margin-top: 14px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+        }
+        .player-controls {
+            background: linear-gradient(180deg, #15192b, #0f1322);
+            border: 1px solid #28304d;
+            border-radius: 8px;
+            padding: 15px 18px;
+        }
+        .player-controls h3 {
+            font-size: .95rem;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #252c47;
+            padding-bottom: 6px;
+        }
+        .player-controls.p1 h3 { color: #ff6b6b; }
+        .player-controls.p2 h3 { color: #4dabf7; }
+        .key-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+            font-size: .82rem;
+        }
+        .key-label { color: #8a94ad; }
+        .key-value { color: #e2e8f0; font-weight: 600; }
+        kbd {
+            background: #1e243d;
+            border: 1px solid #3b4675;
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-family: monospace;
+            font-size: .78rem;
+            color: #f39c12;
+        }
+
+        /* Notification Popup */
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #162c46;
+            color: #fff;
+            border: 1px solid #f39c12;
+            border-radius: 8px;
+            padding: 12px 20px;
+            font-size: .9rem;
+            font-weight: 600;
+            z-index: 1000;
+            transform: translateX(130%);
+            transition: transform .3s ease;
+            box-shadow: 0 6px 20px rgba(0,0,0,.5);
+        }
+        .notification.show { transform: translateX(0); }
+
+        .footer {
+            width: 100%;
+            text-align: center;
+            padding: 14px;
+            color: #556;
+            font-size: .75rem;
+            border-top: 1px solid #151828;
+            margin-top: auto;
+        }
+        .footer a { color: #f39c12; text-decoration: none; }
+
+        @media (max-width: 920px) {
+            .lobby-grid { grid-template-columns: 1fr; }
+            .arena-layout { grid-template-columns: 1fr; }
+            .controls-info { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ═══════════════════ HEADER ═══════════════════ -->
+<div class="header">
+    <div class="header-title">⚔️ Bleach vs Naruto 2.6 — Online PvP</div>
+    <div class="header-status">
+        <span class="connection-dot connecting" id="connDot"></span>
+        <span id="connText">Connecting to server...</span>
+    </div>
+</div>
+
+<!-- ═══════════════════ STATUS BAR ═══════════════════ -->
+<div class="status-bar" id="statusBar">
+    <div class="status-msg" id="statusMsg"></div>
+</div>
+
+<!-- ═══════════════════ LOBBY ═══════════════════ -->
+<div class="lobby" id="lobby">
+
+    <div class="mode-tabs">
+        <button class="mode-tab active" id="tabOnline" onclick="switchMode('online')">🌐 Online PvP Lobby</button>
+        <button class="mode-tab" id="tabLocal" onclick="switchMode('local')">🎮 Local 2P / Solo</button>
+    </div>
+
+    <div class="nickname-bar" id="nicknameBar">
+        <label for="nicknameInput">Fighter Name:</label>
+        <input type="text" id="nicknameInput" maxlength="16" placeholder="Ichigo99" value="">
+    </div>
+
+    <!-- Online PvP Section -->
+    <div id="onlineSection" style="width: 100%;">
+        <div class="lobby-grid">
+            <!-- Quick Match -->
+            <div class="lobby-card full-width">
+                <h3>⚡ Quick Matchmaking</h3>
+                <p>Jump straight into an open match or host a public arena automatically</p>
+                <button class="btn-quick" onclick="quickMatch()">⚔️ Find Match Now</button>
+            </div>
+
+            <!-- Create Room -->
+            <div class="lobby-card">
+                <h3>🏠 Host a Room (Player 1)</h3>
+                <p>Host the game instance and invite a friend via Room Code or Link</p>
+                <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px; font-size:.83rem; color:#aab;">
+                    <label style="cursor:pointer; display:flex; align-items:center; gap:5px;">
+                        <input type="checkbox" id="publicRoomCheck" checked> Show in Public Lobby
+                    </label>
+                </div>
+                <button class="btn-primary" id="btnCreate" onclick="createRoom()">Create Room</button>
+
+                <div class="room-code-display" id="roomCodeDisplay">
+                    <div class="room-code" onclick="copyRoomCode()">
+                        <span class="copy-tooltip" id="copyTooltip">Copied!</span>
+                        <span id="roomCodeText">------</span>
+                    </div>
+                    <div class="share-actions">
+                        <button class="btn-secondary" onclick="copyRoomCode()">📋 Copy Code</button>
+                        <button class="btn-secondary" onclick="copyInviteLink()">🔗 Copy Invite Link</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Join Room -->
+            <div class="lobby-card">
+                <h3>🚪 Join by Room Code (Player 2)</h3>
+                <p>Enter your friend's 6-character code to connect to their arena</p>
+                <div class="input-group">
+                    <input type="text" id="roomCodeInput" placeholder="CODE" maxlength="6"
+                           onkeyup="this.value=this.value.toUpperCase(); if(event.key==='Enter') joinRoom();">
+                    <button class="btn-primary" onclick="joinRoom()">Join</button>
+                </div>
+
+                <!-- Live Public Rooms -->
+                <div style="width:100%; margin-top:20px; text-align:left;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <span style="font-size:.8rem; color:#8a94ad; font-weight:700; text-transform:uppercase;">Open Public Rooms</span>
+                        <button class="btn-secondary" style="padding:3px 9px; font-size:.74rem;" onclick="refreshRooms()">↻ Refresh</button>
+                    </div>
+                    <div class="rooms-list" id="publicRoomsList">
+                        <div style="color:#556; font-size:.82rem; text-align:center; padding:12px;">No open public rooms yet — create one!</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Local Play Section -->
+    <div id="localSection" style="display: none; width: 100%;">
+        <div class="lobby-card full-width">
+            <h3>🎮 Local 2-Player / Single Player Mode</h3>
+            <p>Play solo against the AI or with a friend on the same keyboard — all 36 characters & 27 assists unlocked!</p>
+            <button class="btn-primary" onclick="startLocalGame()">Launch Game Now</button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════ GAME SCREEN ═══════════════════ -->
+<div class="game-screen" id="gameScreen">
+
+    <div class="pvp-guide-banner" id="pvpGuideBanner">
+        <div>
+            💡 <strong>Online PvP Ready:</strong>
+            Player 1 presses <kbd>J</kbd> on the main menu to enter <strong>Character Select</strong> — both <strong>1P</strong> and <strong>2P</strong> cursors are active simultaneously!
+            Both players can use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> + <kbd>J</kbd><kbd>K</kbd><kbd>L</kbd><kbd>U</kbd><kbd>I</kbd><kbd>O</kbd>!
+        </div>
+        <div id="roleHintBadge"></div>
+    </div>
+
+    <div class="game-top-bar">
+        <div class="room-info" id="gameRoomInfo">
+            <span>Room: <strong id="gameRoomCode">—</strong></span>
+            <span>•</span>
+            <span>Role: <strong id="gamePlayerLabel">—</strong></span>
+            <span class="stream-badge webrtc" id="streamModeBadge">WebRTC Initializing...</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <span class="ping" id="pingDisplay">Ping: —</span>
+            <button class="btn-secondary" id="btnStreamMode" style="padding:5px 10px; font-size:.76rem; display:none;" onclick="reconnectWebRTC()">🔄 Reconnect WebRTC</button>
+            <button class="btn-danger" onclick="leaveGame()">✕ Leave Arena</button>
+        </div>
+    </div>
+
+    <div class="arena-layout" id="arenaLayout">
+        <div>
+            <div class="game-container" id="gameContainer">
+                <div class="pvp-overlay" id="gameOverlay">
+                    <div class="spinner"></div>
+                    <div class="overlay-text" id="overlayText">Loading Bleach vs Naruto 2.6...</div>
+                </div>
+                <!-- Used by Player 2 (Guest) for WebRTC P2P Video Stream -->
+                <video id="remoteVideo" autoplay playsinline style="display:none;"></video>
+                <!-- Used by Player 2 (Guest) if fallback WebSocket canvas stream is active -->
+                <img id="fallbackStreamImg" alt="Live Game Stream" style="display:none;" />
+            </div>
+
+            <div class="controls-bar">
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button class="btn-secondary" onclick="toggleFullscreen()">🖥️ Fullscreen</button>
+                    <button class="btn-secondary" onclick="focusGame()">🎯 Focus Controls</button>
+                    <button class="btn-secondary" id="btnUnmuteGuest" style="display:none;" onclick="unmuteRemoteVideo()">🔊 Enable Audio</button>
+                </div>
+                <div style="font-size:.8rem; color:#8a94ad;" id="inputStatusNote">
+                    Click inside the game screen if keyboard inputs aren't responding.
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar: Live Input Visualizer + Room Chat -->
+        <div class="arena-sidebar" id="arenaSidebar">
+            <div class="hud-card">
+                <h4>🟥 Player 1 Live Input</h4>
+                <div class="pad-grid" id="hudP1">
+                    <div class="pad-key" data-act="UP">W</div>
+                    <div class="pad-key" data-act="LEFT">A</div>
+                    <div class="pad-key" data-act="DOWN">S</div>
+                    <div class="pad-key" data-act="RIGHT">D</div>
+                    <div class="pad-key" data-act="ATTACK">J</div>
+                    <div class="pad-key" data-act="JUMP">K</div>
+                    <div class="pad-key" data-act="DASH">L</div>
+                    <div class="pad-key" data-act="FAR">U</div>
+                    <div class="pad-key" data-act="SPECIAL">I</div>
+                    <div class="pad-key" data-act="ASSIST">O</div>
+                </div>
+                <h4 style="margin-top:10px;">🟦 Player 2 Live Input</h4>
+                <div class="pad-grid" id="hudP2">
+                    <div class="pad-key" data-act="UP">W/↑</div>
+                    <div class="pad-key" data-act="LEFT">A/←</div>
+                    <div class="pad-key" data-act="DOWN">S/↓</div>
+                    <div class="pad-key" data-act="RIGHT">D/→</div>
+                    <div class="pad-key" data-act="ATTACK">J/1</div>
+                    <div class="pad-key" data-act="JUMP">K/2</div>
+                    <div class="pad-key" data-act="DASH">L/3</div>
+                    <div class="pad-key" data-act="FAR">U/4</div>
+                    <div class="pad-key" data-act="SPECIAL">I/5</div>
+                    <div class="pad-key" data-act="ASSIST">O/6</div>
+                </div>
+            </div>
+
+            <div class="hud-card" style="flex:1; display:flex; flex-direction:column;">
+                <h4>💬 Arena Chat</h4>
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-row">
+                    <input type="text" id="chatInput" placeholder="Say something..." maxlength="160"
+                           onkeydown="event.stopPropagation(); if(event.key==='Enter') sendChat();"
+                           onkeyup="event.stopPropagation();">
+                    <button class="btn-secondary" onclick="sendChat()">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls-info">
+        <div class="player-controls p1">
+            <h3>🟥 Player 1 Controls (Host / Local P1)</h3>
+            <div class="key-row"><span class="key-label">Move / Guard</span><span class="key-value"><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></span></div>
+            <div class="key-row"><span class="key-label">Attack / Confirm</span><span class="key-value"><kbd>J</kbd></span></div>
+            <div class="key-row"><span class="key-label">Jump / Back</span><span class="key-value"><kbd>K</kbd></span></div>
+            <div class="key-row"><span class="key-label">Dash / Evade</span><span class="key-value"><kbd>L</kbd></span></div>
+            <div class="key-row"><span class="key-label">Ranged / Special / Assist</span><span class="key-value"><kbd>U</kbd> / <kbd>I</kbd> / <kbd>O</kbd></span></div>
+        </div>
+        <div class="player-controls p2">
+            <h3>🟦 Player 2 Controls (Online Guest can use WASD+JKLUIO OR Arrows+Numpad!)</h3>
+            <div class="key-row"><span class="key-label">Online Guest Comfort Keys</span><span class="key-value"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> + <kbd>J</kbd><kbd>K</kbd><kbd>L</kbd><kbd>U</kbd><kbd>I</kbd><kbd>O</kbd> (Auto-mapped to P2!)</span></div>
+            <div class="key-row"><span class="key-label">Classic P2 Move / Guard</span><span class="key-value"><kbd>↑</kbd> <kbd>←</kbd> <kbd>↓</kbd> <kbd>→</kbd></span></div>
+            <div class="key-row"><span class="key-label">Classic P2 Attack / Jump / Dash</span><span class="key-value"><kbd>Num 1</kbd> / <kbd>Num 2</kbd> / <kbd>Num 3</kbd></span></div>
+            <div class="key-row"><span class="key-label">Classic P2 Ranged / Special / Assist</span><span class="key-value"><kbd>Num 4</kbd> / <kbd>Num 5</kbd> / <kbd>Num 6</kbd></span></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════ NOTIFICATION ═══════════════════ -->
+<div class="notification" id="notification"></div>
+
+<!-- ═══════════════════ FOOTER ═══════════════════ -->
+<div class="footer">
+    Bleach vs Naruto 2.6 Online PvP • Powered by <a href="https://ruffle.rs" target="_blank">Ruffle WebAssembly</a> + WebRTC Low-Latency Streaming
+</div>
+
+<!-- ═══════════════════ WEBAUDIO, WEBGL & RUFFLE INPUT/FOCUS HOOKS ═══════════════════ -->
+<script>
+// 1. Ensure Ruffle's WebGL canvas preserves its drawing buffer so both WebRTC captureStream(60)
+//    and WebSocket fallback canvas.toDataURL() capture every frame cleanly.
+(function hookWebGLContext() {
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+        if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+            attrs = Object.assign({}, attrs || {}, { preserveDrawingBuffer: true });
+        }
+        return origGetContext.call(this, type, attrs);
+    };
+})();
+
+// 2. Hook WebAudio so Player 1's Ruffle game audio can be captured into the WebRTC MediaStream for Player 2
+window.__bvnAudioStreamDest = null;
+window.__bvnAudioCtx = null;
+(function hookWebAudio() {
+    const OrigAudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!OrigAudioContext) return;
+    const origConnect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function(dest, ...args) {
+        const result = origConnect.call(this, dest, ...args);
+        try {
+            if (dest && dest.context && dest === dest.context.destination) {
+                if (!window.__bvnAudioStreamDest || window.__bvnAudioCtx !== dest.context) {
+                    window.__bvnAudioCtx = dest.context;
+                    window.__bvnAudioStreamDest = dest.context.createMediaStreamDestination();
+                }
+                origConnect.call(this, window.__bvnAudioStreamDest);
+            }
+        } catch (e) {}
+        return result;
+    };
+})();
+
+// 3. Hook Ruffle's WASM keyboard & focus listeners so:
+//    - Ruffle NEVER loses internal `has_focus` when Host switches windows/tabs or hasn't clicked the canvas
+//    - Ruffle NEVER pauses execution when Host tab is in the background
+//    - Synthetic Player 2 keys can invoke Ruffle's WASM keydown/keyup closures directly
+window.__bvnRuffleKeydownListeners = [];
+window.__bvnRuffleKeyupListeners = [];
+window.__bvnRuffleFocusInListeners = [];
+(function hookRuffleEvents() {
+    try {
+        Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+        Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+    } catch (e) {}
+
+    const origAddEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function(type, listener, options) {
+        if (listener && !listener.__bvnAppListener) {
+            // Prevent Ruffle from registering focusout/blur or visibilitychange pause handlers
+            if (type === 'focusout' || type === 'blur' || type === 'visibilitychange') {
+                return;
+            }
+            const fn = typeof listener === 'function' ? listener : (listener && typeof listener.handleEvent === 'function' ? listener.handleEvent.bind(listener) : null);
+            if (fn) {
+                if (type === 'keydown') {
+                    window.__bvnRuffleKeydownListeners.push({ target: this, fn });
+                } else if (type === 'keyup') {
+                    window.__bvnRuffleKeyupListeners.push({ target: this, fn });
+                } else if (type === 'focusin' || type === 'focus') {
+                    window.__bvnRuffleFocusInListeners.push({ target: this, fn });
+                }
+            }
+        }
+        return origAddEventListener.call(this, type, listener, options);
+    };
+})();
+
+function ensureRuffleFocused() {
+    for (const item of window.__bvnRuffleFocusInListeners) {
+        try {
+            item.fn.call(item.target, new FocusEvent('focusin', { bubbles: true, composed: true }));
+        } catch (e) {}
+    }
+}
+</script>
+
+<!-- ═══════════════════ RUFFLE ═══════════════════ -->
+<script>
+    window.RufflePlayer = window.RufflePlayer || {};
+    window.RufflePlayer.config = {
+        autoplay: "on",
+        unmuteOverlay: "hidden",
+        letterbox: "on",
+        warnOnUnsupportedContent: false,
+        backgroundExecutionMode: "mainThread"
+    };
+</script>
+<script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
+
+<!-- ═══════════════════ ONLINE PVP ENGINE ═══════════════════ -->
+<script>
+// ── State ──────────────────────────────────────────────
+let ws = null;
+let rufflePlayer = null;
+let myPlayerIndex = null; // 1 = Host, 2 = Guest, 0 = Local
+let currentRoomCode = null;
+let gameMode = null; // 'online' | 'local'
+let pingInterval = null;
+let lastPingTime = 0;
+let inputSeq = 0;
+
+// WebRTC State
+let peerConn = null;
+let dataChannel = null;
+let webrtcConnected = false;
+let hostRuffleReady = false;
+let guestReadyReceived = false;
+let pendingIceCandidates = [];
+let signalQueue = Promise.resolve();
+let webrtcRetryTimer = null;
+let canvasCaptureStream = null;
+
+const RTC_CONFIG = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
+    ]
+};
+
+// ── Logical Action Mapping ─────────────────────────────
+// All 10 BvN 2.6 actions
+const ACTIONS = ['UP', 'DOWN', 'LEFT', 'RIGHT', 'ATTACK', 'JUMP', 'DASH', 'FAR', 'SPECIAL', 'ASSIST'];
+
+// Map physical KeyboardEvent.code -> Logical Action for P1
+const CODE_TO_P1_ACTION = {
+    'KeyW': 'UP',
+    'KeyS': 'DOWN',
+    'KeyA': 'LEFT',
+    'KeyD': 'RIGHT',
+    'KeyJ': 'ATTACK',
+    'KeyK': 'JUMP',
+    'KeyL': 'DASH',
+    'KeyU': 'FAR',
+    'KeyI': 'SPECIAL',
+    'KeyO': 'ASSIST'
+};
+
+// Map physical KeyboardEvent.code -> Logical Action for P2
+// Guest can comfortably use EITHER WASD+JKLUIO OR ArrowKeys+Numpad1-6 (or top-row 1-6)!
+const CODE_TO_GUEST_ACTION = {
+    ...CODE_TO_P1_ACTION,
+    'ArrowUp': 'UP',
+    'ArrowDown': 'DOWN',
+    'ArrowLeft': 'LEFT',
+    'ArrowRight': 'RIGHT',
+    'Numpad1': 'ATTACK', 'Digit1': 'ATTACK',
+    'Numpad2': 'JUMP',   'Digit2': 'JUMP',
+    'Numpad3': 'DASH',   'Digit3': 'DASH',
+    'Numpad4': 'FAR',    'Digit4': 'FAR',
+    'Numpad5': 'SPECIAL','Digit5': 'SPECIAL',
+    'Numpad6': 'ASSIST', 'Digit6': 'ASSIST'
+};
+
+// On Host's Ruffle instance, Player 2 is controlled by Arrow Keys + Numpad 1..6
+const ACTION_TO_P2_SYNTHETIC_KEY = {
+    'UP':      { code: 'ArrowUp',    key: 'ArrowUp',    keyCode: 38,  location: 0 },
+    'DOWN':    { code: 'ArrowDown',  key: 'ArrowDown',  keyCode: 40,  location: 0 },
+    'LEFT':    { code: 'ArrowLeft',  key: 'ArrowLeft',  keyCode: 37,  location: 0 },
+    'RIGHT':   { code: 'ArrowRight', key: 'ArrowRight', keyCode: 39,  location: 0 },
+    'ATTACK':  { code: 'Numpad1',    key: '1',          keyCode: 97,  location: 3 },
+    'JUMP':    { code: 'Numpad2',    key: '2',          keyCode: 98,  location: 3 },
+    'DASH':    { code: 'Numpad3',    key: '3',          keyCode: 99,  location: 3 },
+    'FAR':     { code: 'Numpad4',    key: '4',          keyCode: 100, location: 3 },
+    'SPECIAL': { code: 'Numpad5',    key: '5',          keyCode: 101, location: 3 },
+    'ASSIST':  { code: 'Numpad6',    key: '6',          keyCode: 102, location: 3 }
+};
+
+const P2_NATIVE_CODES = new Set([
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Numpad1', 'Numpad2', 'Numpad3', 'Numpad4', 'Numpad5', 'Numpad6'
+]);
+
+const p1ActionState = {};
+const p2ActionState = {};
+
+// Initialize random fighter name
+document.getElementById('nicknameInput').value = 'Fighter_' + Math.floor(100 + Math.random() * 900);
+
+function getNickname() {
+    return document.getElementById('nicknameInput').value.trim() || 'Fighter';
+}
+
+// ── WebSocket Connection ───────────────────────────────
+function connectWS() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}`);
+
+    ws.onopen = () => {
+        updateConnection('connected', 'Online Server Ready');
+        startPing();
+        // Auto-join if ?room=CODE is in URL
+        const params = new URLSearchParams(location.search);
+        const autoRoom = params.get('room');
+        if (autoRoom && !currentRoomCode) {
+            document.getElementById('roomCodeInput').value = autoRoom.toUpperCase();
+            joinRoom();
+            window.history.replaceState({}, document.title, location.pathname);
+        }
+    };
+
+    ws.onclose = () => {
+        updateConnection('disconnected', 'Disconnected — reconnecting...');
+        stopPing();
+        setTimeout(connectWS, 2000);
+    };
+
+    ws.onerror = () => {
+        updateConnection('disconnected', 'Connection error');
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            handleServerMessage(msg);
+        } catch (e) {}
+    };
+}
+
+function sendWS(data) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+    }
+}
+
+function startPing() {
+    stopPing();
+    pingInterval = setInterval(() => {
+        lastPingTime = Date.now();
+        if (dataChannel && dataChannel.readyState === 'open') {
+            try {
+                dataChannel.send(JSON.stringify({ type: 'DC_PING', clientTime: lastPingTime }));
+                return;
+            } catch (e) {}
+        }
+        sendWS({ type: 'PING', clientTime: lastPingTime });
+    }, 2000);
+}
+function stopPing() {
+    if (pingInterval) clearInterval(pingInterval);
+}
+
+// ── Server Message Handler ─────────────────────────────
+function handleServerMessage(msg) {
+    switch (msg.type) {
+        case 'ROOMS_LIST':
+            renderPublicRooms(msg.rooms || []);
+            break;
+
+        case 'ROOM_CREATED':
+            currentRoomCode = msg.roomCode;
+            myPlayerIndex = msg.playerIndex;
+            document.getElementById('roomCodeText').textContent = msg.roomCode;
+            document.getElementById('roomCodeDisplay').classList.add('visible');
+            document.getElementById('btnCreate').disabled = true;
+            document.getElementById('btnCreate').textContent = 'Waiting for Challenger...';
+            showStatus('waiting', msg.message);
+            break;
+
+        case 'ROOM_WAITING':
+            myPlayerIndex = msg.playerIndex || 1;
+            showStatus('waiting', msg.message);
+            appendChatLine('System', msg.message, true);
+            releaseAllSyntheticP2Keys();
+            cleanupWebRTC();
+            break;
+
+        case 'MATCH_START':
+            currentRoomCode = msg.roomCode;
+            myPlayerIndex = msg.playerIndex;
+            gameMode = 'online';
+            showStatus('success', `Match starting! ${msg.hostName} (P1) vs ${msg.guestName} (P2)`);
+            showNotification(`⚔️ ${msg.hostName} vs ${msg.guestName}!`);
+            startGame(msg.hostName, msg.guestName);
+            break;
+
+        case 'WEBRTC_SIGNAL':
+            enqueueWebRTCSignal(msg.signal);
+            break;
+
+        case 'REMOTE_INPUT':
+            // Only use WebSocket input if WebRTC DataChannel is not open yet
+            if (!dataChannel || dataChannel.readyState !== 'open') {
+                handleRemoteActions(msg.playerIndex, msg.actions);
+            }
+            break;
+
+        case 'CHAT':
+            appendChatLine(msg.nickname || `Player ${msg.playerIndex}`, msg.text, false, msg.playerIndex);
+            break;
+
+        case 'OPPONENT_LEFT':
+            showNotification('⚠️ Opponent disconnected!');
+            appendChatLine('System', 'Opponent left the arena.', true);
+            releaseAllSyntheticP2Keys();
+            break;
+
+        case 'PONG': {
+            const rtt = Date.now() - (msg.clientTime || lastPingTime);
+            const pingEl = document.getElementById('pingDisplay');
+            pingEl.textContent = `Ping: ${rtt}ms`;
+            pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
+            break;
+        }
+
+        case 'ERROR':
+            showStatus('error', msg.message);
+            showNotification(`❌ ${msg.message}`);
+            break;
+    }
+}
+
+// ── Lobby Functions ────────────────────────────────────
+function renderPublicRooms(rooms) {
+    const container = document.getElementById('publicRoomsList');
+    if (!rooms.length) {
+        container.innerHTML = `<div style="color:#556; font-size:.82rem; text-align:center; padding:12px;">No open public rooms right now — click Quick Match or Create Room!</div>`;
+        return;
+    }
+    container.innerHTML = rooms.map(r => `
+        <div class="room-item">
+            <div class="room-item-info">
+                <span class="room-badge">${r.roomCode}</span>
+                <span>Host: <strong>${escapeHtml(r.hostName)}</strong></span>
+            </div>
+            <button class="btn-secondary" style="padding:5px 14px;" onclick="joinSpecificRoom('${r.roomCode}')">Join Fight →</button>
+        </div>
+    `).join('');
+}
+
+function refreshRooms() {
+    sendWS({ type: 'LIST_ROOMS' });
+}
+
+function quickMatch() {
+    sendWS({ type: 'QUICK_MATCH', nickname: getNickname() });
+}
+
+function createRoom() {
+    const isPublic = document.getElementById('publicRoomCheck').checked;
+    sendWS({ type: 'CREATE_ROOM', nickname: getNickname(), isPublic });
+}
+
+function joinRoom() {
+    const code = document.getElementById('roomCodeInput').value.trim().toUpperCase();
+    if (!code) {
+        showStatus('error', 'Please enter a 6-character room code.');
+        return;
+    }
+    sendWS({ type: 'JOIN_ROOM', roomCode: code, nickname: getNickname() });
+}
+
+function joinSpecificRoom(code) {
+    document.getElementById('roomCodeInput').value = code;
+    joinRoom();
+}
+
+function copyRoomCode() {
+    const code = document.getElementById('roomCodeText').textContent.trim();
+    navigator.clipboard.writeText(code).then(() => {
+        showCopyTooltip('Copied Code!');
+    });
+}
+
+function copyInviteLink() {
+    const code = document.getElementById('roomCodeText').textContent.trim();
+    const url = `${location.origin}${location.pathname}?room=${code}`;
+    navigator.clipboard.writeText(url).then(() => {
+        showCopyTooltip('Invite Link Copied!');
+    });
+}
+
+function showCopyTooltip(text) {
+    const tooltip = document.getElementById('copyTooltip');
+    tooltip.textContent = text;
+    tooltip.classList.add('show');
+    setTimeout(() => tooltip.classList.remove('show'), 1600);
+}
+
+function switchMode(mode) {
+    document.getElementById('tabOnline').classList.toggle('active', mode === 'online');
+    document.getElementById('tabLocal').classList.toggle('active', mode === 'local');
+    document.getElementById('onlineSection').style.display = mode === 'online' ? 'block' : 'none';
+    document.getElementById('nicknameBar').style.display = mode === 'online' ? 'flex' : 'none';
+    document.getElementById('localSection').style.display = mode === 'local' ? 'block' : 'none';
+}
+
+function startLocalGame() {
+    gameMode = 'local';
+    myPlayerIndex = 0;
+    startGame('Player 1', 'Player 2');
+}
+
+// ── Start Game Session ─────────────────────────────────
+async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
+    document.getElementById('lobby').classList.add('hidden');
+    document.getElementById('statusBar').classList.remove('visible');
+    document.getElementById('gameScreen').classList.add('visible');
+
+    const overlay = document.getElementById('gameOverlay');
+    const overlayText = document.getElementById('overlayText');
+    overlay.classList.remove('hidden');
+
+    if (gameMode === 'online') {
+        document.getElementById('arenaLayout').classList.remove('no-sidebar');
+        document.getElementById('arenaSidebar').style.display = 'flex';
+        document.getElementById('pvpGuideBanner').style.display = 'flex';
+        document.getElementById('gameRoomCode').textContent = currentRoomCode;
+        const roleLabel = myPlayerIndex === 1 ? `Player 1 (Host - ${hostName})` : `Player 2 (Challenger - ${guestName})`;
+        const labelEl = document.getElementById('gamePlayerLabel');
+        labelEl.textContent = roleLabel;
+        labelEl.style.color = myPlayerIndex === 1 ? '#ff6b6b' : '#4dabf7';
+        document.getElementById('btnStreamMode').style.display = 'inline-block';
+
+        appendChatLine('System', `Arena ${currentRoomCode} started! ${hostName} (P1) vs ${guestName} (P2).`, true);
+
+        if (myPlayerIndex === 1) {
+            // HOST: Run authoritative Ruffle instance and stream canvas + audio over WebRTC to Guest
+            hostRuffleReady = false;
+            overlayText.textContent = 'Starting Host Flash Engine (Ruffle)...';
+            updateStreamBadge('webrtc', 'Loading Host Engine...');
+            await loadHostRuffleGame();
+            await waitForRuffleCanvas();
+            hostRuffleReady = true;
+            overlay.classList.add('hidden');
+            updateStreamBadge('webrtc', 'WebRTC Handshaking...');
+            // Immediately initiate WebRTC Offer once Host's Ruffle canvas is ready!
+            await initHostWebRTC();
+        } else {
+            // GUEST: Receive live WebRTC 60FPS video/audio stream from Host & send inputs over RTCDataChannel
+            overlayText.textContent = 'Connecting to Player 1 via WebRTC P2P...';
+            if (rufflePlayer) {
+                rufflePlayer.remove();
+                rufflePlayer = null;
+            }
+            document.getElementById('fallbackStreamImg').style.display = 'none';
+            updateStreamBadge('webrtc', 'WebRTC Connecting P2P...');
+            sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+            if (webrtcRetryTimer) clearInterval(webrtcRetryTimer);
+            webrtcRetryTimer = setInterval(() => {
+                if (gameMode === 'online' && myPlayerIndex === 2 && !webrtcConnected) {
+                    sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+                } else {
+                    clearInterval(webrtcRetryTimer);
+                    webrtcRetryTimer = null;
+                }
+            }, 2500);
+        }
+    } else {
+        // LOCAL PLAY
+        document.getElementById('arenaLayout').classList.add('no-sidebar');
+        document.getElementById('arenaSidebar').style.display = 'none';
+        document.getElementById('pvpGuideBanner').style.display = 'none';
+        document.getElementById('gameRoomInfo').innerHTML = '<span>🎮 Local Mode — Solo vs AI or 2 Players on Keyboard</span>';
+        document.getElementById('pingDisplay').style.display = 'none';
+        document.getElementById('btnStreamMode').style.display = 'none';
+
+        overlayText.textContent = 'Loading Bleach vs Naruto 2.6...';
+        await loadHostRuffleGame();
+        overlay.classList.add('hidden');
+    }
+}
+
+async function loadHostRuffleGame() {
+    await waitForRuffle();
+    if (rufflePlayer) {
+        rufflePlayer.remove();
+        rufflePlayer = null;
+    }
+    window.__bvnRuffleKeydownListeners.length = 0;
+    window.__bvnRuffleKeyupListeners.length = 0;
+    window.__bvnRuffleFocusInListeners.length = 0;
+
+    document.getElementById('remoteVideo').style.display = 'none';
+    document.getElementById('fallbackStreamImg').style.display = 'none';
+
+    const ruffle = window.RufflePlayer.newest();
+    rufflePlayer = ruffle.createPlayer();
+    rufflePlayer.style.width = '100%';
+    rufflePlayer.style.height = '100%';
+    rufflePlayer.setAttribute('tabindex', '0');
+    document.getElementById('gameContainer').appendChild(rufflePlayer);
+
+    // In Online PvP mode, load the patched PvP SWF where any fight button forces VS HUMAN 2P mode!
+    const swfUrl = gameMode === 'online' ? 'bleach_vs_naruto_pvp.swf' : 'bleach_vs_naruto.swf';
+    await rufflePlayer.load({
+        url: swfUrl,
+        quality: 'high',
+        scale: 'showAll',
+        autoplay: 'on',
+        letterbox: 'on',
+        logLevel: 'error',
+        backgroundExecutionMode: 'mainThread'
+    });
+
+    ensureRuffleFocused();
+    setTimeout(() => {
+        ensureRuffleFocused();
+        focusGame();
+    }, 300);
+}
+
+function waitForRuffle() {
+    return new Promise((resolve, reject) => {
+        if (window.RufflePlayer && window.RufflePlayer.newest) return resolve();
+        let elapsed = 0;
+        const iv = setInterval(() => {
+            elapsed += 100;
+            if (window.RufflePlayer && window.RufflePlayer.newest) {
+                clearInterval(iv);
+                resolve();
+            } else if (elapsed > 15000) {
+                clearInterval(iv);
+                reject(new Error('Failed to load Ruffle Flash engine.'));
+            }
+        }, 100);
+    });
+}
+
+// ── WebRTC Host-Canvas Video/Audio + DataChannel ───────
+function getRuffleCanvas() {
+    if (!rufflePlayer || !rufflePlayer.shadowRoot) return null;
+    return rufflePlayer.shadowRoot.querySelector('canvas');
+}
+
+async function waitForRuffleCanvas() {
+    for (let i = 0; i < 50; i++) {
+        const c = getRuffleCanvas();
+        if (c && c.width > 0 && c.height > 0) {
+            return c;
+        }
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return getRuffleCanvas();
+}
+
+function enqueueWebRTCSignal(signal) {
+    signalQueue = signalQueue
+        .then(() => handleWebRTCSignal(signal))
+        .catch(() => {});
+}
+
+async function flushPendingIceCandidates() {
+    if (!peerConn || !peerConn.remoteDescription || !peerConn.remoteDescription.type) return;
+    while (pendingIceCandidates.length > 0) {
+        const cand = pendingIceCandidates.shift();
+        try {
+            await peerConn.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) {}
+    }
+}
+
+async function initHostWebRTC() {
+    if (!hostRuffleReady) {
+        guestReadyReceived = true;
+        return;
+    }
+    cleanupWebRTC();
+    peerConn = new RTCPeerConnection(RTC_CONFIG);
+
+    // Create ultra-low-latency DataChannel for Guest inputs & Host HUD updates
+    dataChannel = peerConn.createDataChannel('bvn-inputs', {
+        ordered: false,
+        maxRetransmits: 0
+    });
+    setupDataChannel(dataChannel);
+
+    peerConn.onicecandidate = (e) => {
+        if (e.candidate) {
+            sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
+        }
+    };
+
+    peerConn.onconnectionstatechange = () => {
+        const st = peerConn?.connectionState;
+        if (st === 'connected') {
+            webrtcConnected = true;
+            updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+        } else if (st === 'connecting') {
+            updateStreamBadge('webrtc', 'WebRTC Connecting...');
+        } else if (st === 'failed' || st === 'disconnected') {
+            webrtcConnected = false;
+            updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
+        }
+    };
+
+    const canvas = await waitForRuffleCanvas();
+    if (canvas && canvas.captureStream) {
+        canvasCaptureStream = canvas.captureStream(60);
+        // Attach Ruffle WebAudio stream track if available
+        if (window.__bvnAudioStreamDest && window.__bvnAudioStreamDest.stream) {
+            const audioTracks = window.__bvnAudioStreamDest.stream.getAudioTracks();
+            audioTracks.forEach(t => canvasCaptureStream.addTrack(t));
+        }
+        canvasCaptureStream.getTracks().forEach(track => {
+            if (track.kind === 'video' && 'contentHint' in track) {
+                track.contentHint = 'motion';
+            }
+            peerConn.addTrack(track, canvasCaptureStream);
+        });
+    }
+
+    const offer = await peerConn.createOffer();
+    await peerConn.setLocalDescription(offer);
+    sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'OFFER', sdp: peerConn.localDescription } });
+}
+
+async function handleWebRTCSignal(signal) {
+    if (!signal) return;
+
+    if (signal.type === 'GUEST_READY' && myPlayerIndex === 1) {
+        guestReadyReceived = true;
+        if (hostRuffleReady && !webrtcConnected) {
+            await initHostWebRTC();
+        }
+        return;
+    }
+
+    if (signal.type === 'OFFER' && myPlayerIndex === 2) {
+        cleanupWebRTC();
+        peerConn = new RTCPeerConnection(RTC_CONFIG);
+
+        peerConn.ondatachannel = (e) => {
+            dataChannel = e.channel;
+            setupDataChannel(dataChannel);
+        };
+
+        peerConn.ontrack = (e) => {
+            const videoEl = document.getElementById('remoteVideo');
+            if (e.streams && e.streams[0]) {
+                if (videoEl.srcObject !== e.streams[0]) {
+                    videoEl.srcObject = e.streams[0];
+                }
+            } else {
+                let s = videoEl.srcObject;
+                if (!s) {
+                    s = new MediaStream();
+                    videoEl.srcObject = s;
+                }
+                s.addTrack(e.track);
+            }
+            videoEl.style.display = 'block';
+            document.getElementById('fallbackStreamImg').style.display = 'none';
+            document.getElementById('gameOverlay').classList.add('hidden');
+            videoEl.play().catch(() => {
+                videoEl.muted = true;
+                videoEl.play().catch(() => {});
+                document.getElementById('btnUnmuteGuest').style.display = 'inline-block';
+            });
+        };
+
+        peerConn.onicecandidate = (e) => {
+            if (e.candidate) {
+                sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
+            }
+        };
+
+        peerConn.onconnectionstatechange = () => {
+            const st = peerConn?.connectionState;
+            if (st === 'connected') {
+                webrtcConnected = true;
+                if (webrtcRetryTimer) {
+                    clearInterval(webrtcRetryTimer);
+                    webrtcRetryTimer = null;
+                }
+                updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+            } else if (st === 'connecting') {
+                updateStreamBadge('webrtc', 'WebRTC Connecting...');
+            } else if (st === 'failed' || st === 'disconnected') {
+                webrtcConnected = false;
+                updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
+                sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+            }
+        };
+
+        await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        await flushPendingIceCandidates();
+        const answer = await peerConn.createAnswer();
+        await peerConn.setLocalDescription(answer);
+        sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ANSWER', sdp: peerConn.localDescription } });
+        return;
+    }
+
+    if (signal.type === 'ANSWER' && myPlayerIndex === 1 && peerConn) {
+        await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        await flushPendingIceCandidates();
+        return;
+    }
+
+    if (signal.type === 'ICE' && signal.candidate) {
+        if (peerConn && peerConn.remoteDescription && peerConn.remoteDescription.type) {
+            try {
+                await peerConn.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            } catch (e) {}
+        } else {
+            pendingIceCandidates.push(signal.candidate);
+        }
+    }
+}
+
+function setupDataChannel(dc) {
+    dc.onopen = () => {
+        webrtcConnected = true;
+        if (webrtcRetryTimer) {
+            clearInterval(webrtcRetryTimer);
+            webrtcRetryTimer = null;
+        }
+        updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+    };
+    dc.onmessage = (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'INPUT') {
+                handleRemoteActions(msg.playerIndex, msg.actions);
+            } else if (msg.type === 'DC_PING') {
+                dc.send(JSON.stringify({ type: 'DC_PONG', clientTime: msg.clientTime }));
+            } else if (msg.type === 'DC_PONG') {
+                const rtt = Date.now() - (msg.clientTime || lastPingTime);
+                const pingEl = document.getElementById('pingDisplay');
+                pingEl.textContent = `P2P Ping: ${rtt}ms`;
+                pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
+            }
+        } catch (err) {}
+    };
+}
+
+function cleanupWebRTC() {
+    webrtcConnected = false;
+    pendingIceCandidates = [];
+    if (dataChannel) {
+        try { dataChannel.close(); } catch (e) {}
+        dataChannel = null;
+    }
+    if (peerConn) {
+        try { peerConn.close(); } catch (e) {}
+        peerConn = null;
+    }
+}
+
+function reconnectWebRTC() {
+    if (gameMode !== 'online') return;
+    cleanupWebRTC();
+    updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
+    showNotification('🔄 Reconnecting WebRTC P2P Stream + DataChannel...');
+    if (myPlayerIndex === 1) {
+        initHostWebRTC();
+    } else if (myPlayerIndex === 2) {
+        sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+    }
+}
+
+function unmuteRemoteVideo() {
+    const videoEl = document.getElementById('remoteVideo');
+    videoEl.muted = false;
+    videoEl.play().catch(() => {});
+    document.getElementById('btnUnmuteGuest').style.display = 'none';
+}
+
+// ── Input Capture, Relay & Synthetic Ruffle Injection ──
+function onWindowKeyDown(e) {
+    if (gameMode !== 'online') return;
+    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    if (myPlayerIndex === 1) {
+        // Host: block physical P2 keys so Host only controls P1, while synthetic P2 events pass through
+        if (e.isTrusted && P2_NATIVE_CODES.has(e.code)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        const act = CODE_TO_P1_ACTION[e.code];
+        if (act) {
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+                e.preventDefault();
+            }
+            if (!p1ActionState[act]) {
+                p1ActionState[act] = true;
+                updateHud('hudP1', p1ActionState, 'active-p1');
+                broadcastMyActions(p1ActionState);
+            }
+        }
+    } else if (myPlayerIndex === 2) {
+        // Guest: capture either WASD+JKLUIO or Arrows+Numpad1-6 and send as P2 actions to Host
+        const act = CODE_TO_GUEST_ACTION[e.code];
+        if (act) {
+            e.preventDefault();
+            if (!p2ActionState[act]) {
+                p2ActionState[act] = true;
+                updateHud('hudP2', p2ActionState, 'active-p2');
+                broadcastMyActions(p2ActionState);
+            }
+        }
+    }
+}
+onWindowKeyDown.__bvnAppListener = true;
+window.addEventListener('keydown', onWindowKeyDown, true);
+
+function onWindowKeyUp(e) {
+    if (gameMode !== 'online') return;
+    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    if (myPlayerIndex === 1) {
+        if (e.isTrusted && P2_NATIVE_CODES.has(e.code)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        const act = CODE_TO_P1_ACTION[e.code];
+        if (act && p1ActionState[act]) {
+            p1ActionState[act] = false;
+            updateHud('hudP1', p1ActionState, 'active-p1');
+            broadcastMyActions(p1ActionState);
+        }
+    } else if (myPlayerIndex === 2) {
+        const act = CODE_TO_GUEST_ACTION[e.code];
+        if (act && p2ActionState[act]) {
+            e.preventDefault();
+            p2ActionState[act] = false;
+            updateHud('hudP2', p2ActionState, 'active-p2');
+            broadcastMyActions(p2ActionState);
+        }
+    }
+}
+onWindowKeyUp.__bvnAppListener = true;
+window.addEventListener('keyup', onWindowKeyUp, true);
+
+function broadcastMyActions(stateObj) {
+    const payload = {
+        type: 'INPUT',
+        playerIndex: myPlayerIndex,
+        actions: stateObj,
+        seq: ++inputSeq
+    };
+    if (dataChannel && dataChannel.readyState === 'open') {
+        try {
+            dataChannel.send(JSON.stringify(payload));
+            return;
+        } catch (e) {}
+    }
+    sendWS(payload);
+}
+
+// Minimum key hold time (65ms = ~2 frames at 30 FPS) so rapid taps are guaranteed to be observed
+// by Bleach vs Naruto 2.6's onEnterFrame Key.isDown() polling.
+const MIN_HOLD_MS = 65;
+const p2KeyDownTime = {};
+const p2ReleaseTimer = {};
+
+function handleRemoteActions(fromPlayer, actions) {
+    if (!actions) return;
+
+    if (fromPlayer === 2 && myPlayerIndex === 1) {
+        // Host receives Guest (Player 2) logical actions -> inject synthetic P2 keys into Ruffle!
+        ACTIONS.forEach(act => {
+            const pressed = !!actions[act];
+            const wasPressed = !!p2ActionState[act];
+            if (pressed && !wasPressed) {
+                if (p2ReleaseTimer[act]) {
+                    clearTimeout(p2ReleaseTimer[act]);
+                    p2ReleaseTimer[act] = null;
+                }
+                p2ActionState[act] = true;
+                p2KeyDownTime[act] = performance.now();
+                dispatchSyntheticP2Key(act, 'keydown');
+            } else if (!pressed && wasPressed) {
+                p2ActionState[act] = false;
+                const elapsed = performance.now() - (p2KeyDownTime[act] || 0);
+                if (elapsed < MIN_HOLD_MS) {
+                    if (p2ReleaseTimer[act]) clearTimeout(p2ReleaseTimer[act]);
+                    p2ReleaseTimer[act] = setTimeout(() => {
+                        p2ReleaseTimer[act] = null;
+                        if (!p2ActionState[act]) {
+                            dispatchSyntheticP2Key(act, 'keyup');
+                        }
+                    }, MIN_HOLD_MS - elapsed);
+                } else {
+                    dispatchSyntheticP2Key(act, 'keyup');
+                }
+            }
+        });
+        updateHud('hudP2', p2ActionState, 'active-p2');
+    } else if (fromPlayer === 1 && myPlayerIndex === 2) {
+        // Guest receives Host (Player 1) HUD state
+        ACTIONS.forEach(act => {
+            p1ActionState[act] = !!actions[act];
+        });
+        updateHud('hudP1', p1ActionState, 'active-p1');
+    }
+}
+
+function dispatchSyntheticP2Key(action, eventType) {
+    const keyDef = ACTION_TO_P2_SYNTHETIC_KEY[action];
+    if (!keyDef || !rufflePlayer) return;
+
+    // Force Ruffle's internal WASM `has_focus` flag to true before injecting key event
+    ensureRuffleFocused();
+
+    const evt = new KeyboardEvent(eventType, {
+        code: keyDef.code,
+        key: keyDef.key,
+        location: keyDef.location,
+        bubbles: true,
+        composed: true,
+        cancelable: true
+    });
+    Object.defineProperty(evt, 'keyCode', { get: () => keyDef.keyCode });
+    Object.defineProperty(evt, 'which', { get: () => keyDef.keyCode });
+
+    const list = eventType === 'keydown' ? window.__bvnRuffleKeydownListeners : window.__bvnRuffleKeyupListeners;
+    if (list && list.length > 0) {
+        for (const item of list) {
+            try {
+                item.fn.call(item.target, evt);
+            } catch (e) {}
+        }
+    } else {
+        const target = getRuffleCanvas() || rufflePlayer;
+        target.dispatchEvent(evt);
+    }
+}
+
+function releaseAllSyntheticP2Keys() {
+    ACTIONS.forEach(act => {
+        if (p2ReleaseTimer[act]) {
+            clearTimeout(p2ReleaseTimer[act]);
+            p2ReleaseTimer[act] = null;
+        }
+        if (p2ActionState[act]) {
+            p2ActionState[act] = false;
+            dispatchSyntheticP2Key(act, 'keyup');
+        }
+    });
+    updateHud('hudP2', p2ActionState, 'active-p2');
+}
+
+function updateHud(hudId, stateObj, activeClass) {
+    const container = document.getElementById(hudId);
+    if (!container) return;
+    container.querySelectorAll('.pad-key').forEach(el => {
+        const act = el.getAttribute('data-act');
+        el.classList.toggle(activeClass, !!stateObj[act]);
+    });
+}
+
+// ── Chat & UI Helpers ──────────────────────────────────
+function sendChat() {
+    const input = document.getElementById('chatInput');
+    const text = input.value.trim();
+    if (!text) return;
+    sendWS({ type: 'CHAT', text });
+    input.value = '';
+    focusGame();
+}
+
+function appendChatLine(sender, text, isSystem = false, playerIndex = 0) {
+    const box = document.getElementById('chatMessages');
+    if (!box) return;
+    const div = document.createElement('div');
+    div.className = 'chat-line';
+    if (isSystem) {
+        div.innerHTML = `<span class="sys-msg">⚡ ${escapeHtml(text)}</span>`;
+    } else {
+        const cls = playerIndex === 1 ? 'p1-name' : 'p2-name';
+        div.innerHTML = `<span class="${cls}">${escapeHtml(sender)}:</span> ${escapeHtml(text)}`;
+    }
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+}
+
+function focusGame() {
+    if (rufflePlayer) {
+        try { rufflePlayer.focus(); } catch (e) {}
+    } else {
+        window.focus();
+    }
+}
+
+function toggleFullscreen() {
+    const container = document.getElementById('gameContainer');
+    if (!document.fullscreenElement) {
+        container.requestFullscreen().catch(() => {});
+    } else {
+        document.exitFullscreen();
+    }
+}
+
+function leaveGame() {
+    if (gameMode === 'online') {
+        sendWS({ type: 'LEAVE_ROOM' });
+    }
+    releaseAllSyntheticP2Keys();
+    cleanupWebRTC();
+    if (webrtcRetryTimer) {
+        clearInterval(webrtcRetryTimer);
+        webrtcRetryTimer = null;
+    }
+    hostRuffleReady = false;
+    guestReadyReceived = false;
+    if (rufflePlayer) {
+        rufflePlayer.remove();
+        rufflePlayer = null;
+    }
+    const videoEl = document.getElementById('remoteVideo');
+    videoEl.srcObject = null;
+    videoEl.style.display = 'none';
+    document.getElementById('fallbackStreamImg').style.display = 'none';
+
+    document.getElementById('gameScreen').classList.remove('visible');
+    document.getElementById('lobby').classList.remove('hidden');
+    document.getElementById('roomCodeDisplay').classList.remove('visible');
+    document.getElementById('btnCreate').disabled = false;
+    document.getElementById('btnCreate').textContent = 'Create Room';
+    document.getElementById('chatMessages').innerHTML = '';
+    currentRoomCode = null;
+    myPlayerIndex = null;
+    ACTIONS.forEach(a => { p1ActionState[a] = false; p2ActionState[a] = false; });
+}
+
+function updateStreamBadge(mode, text) {
+    const el = document.getElementById('streamModeBadge');
+    if (!el) return;
+    el.className = `stream-badge ${mode}`;
+    el.textContent = text;
+}
+
+function updateConnection(state, text) {
+    document.getElementById('connDot').className = `connection-dot ${state}`;
+    document.getElementById('connText').textContent = text;
+}
+
+function showStatus(type, message) {
+    const bar = document.getElementById('statusBar');
+    const msg = document.getElementById('statusMsg');
+    msg.className = `status-msg ${type}`;
+    msg.textContent = message;
+    bar.classList.add('visible');
+}
+
+function showNotification(text) {
+    const el = document.getElementById('notification');
+    el.textContent = text;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 3200);
+}
+
+function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, s => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[s]));
+}
+
+// ── Start ──────────────────────────────────────────────
+connectWS();
+</script>
+</body>
+</html>
