@@ -1134,6 +1134,9 @@ const CLOUD_BROKERS = [
     'wss://broker.hivemq.com:8884/mqtt'
 ];
 let brokerIdx = 0;
+let transportMode = 'cloud-mqtt'; // 'direct-ws' (Radmin VPN / LAN server.js) | 'cloud-mqtt' (GitHub Pages serverless)
+let directWs = null;
+let directServerUrls = null;
 let mqttClient = null;       // Strictly for instant <60B Control / Input / Ping packets (Zero video congestion!)
 let mqttStreamClient = null; // Separate WebSocket connection strictly for fallback video frames
 let streamQualityPreset = 'ultra'; // 'ultra' | 'balanced' | 'high'
@@ -1158,6 +1161,7 @@ let gameMode = null; // 'online' | 'local'
 let pingInterval = null;
 let lastPingTime = 0;
 let inputSeq = 0;
+let cloudRelayHintShown = false;
 
 // WebRTC State
 let peerConn = null;
@@ -1170,14 +1174,14 @@ let signalQueue = Promise.resolve();
 let webrtcRetryTimer = null;
 let canvasCaptureStream = null;
 let fallbackInterval = null;
+let rtcSessionSeq = 0;
+let currentRtcId = null;
+let rtcAttemptStartedAt = 0;
 
 const RTC_CONFIG = {
-    iceCandidatePoolSize: 10,
+    iceCandidatePoolSize: 4,
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' }
     ]
 };
@@ -1265,6 +1269,125 @@ function getPlayerInboxTopic(roomCode, targetPlayerIndex) {
 
 function getPlayerStreamTopic(roomCode, targetPlayerIndex) {
     return `${TOPIC_PREFIX}/stream/${roomCode}/p${targetPlayerIndex}`;
+}
+
+async function startNetwork() {
+    updateConnection('connecting', 'Detecting fastest network path...');
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+        try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 900);
+            const res = await fetch('/api/health', { cache: 'no-store', signal: ctrl.signal });
+            clearTimeout(timer);
+            if (res.ok) {
+                const info = await res.json();
+                if (info && info.status === 'ok' && info.mode === 'direct-server') {
+                    transportMode = 'direct-ws';
+                    try {
+                        const ipRes = await fetch('/api/ips', { cache: 'no-store' });
+                        if (ipRes.ok) directServerUrls = await ipRes.json();
+                    } catch (e) {}
+                    connectDirectServer();
+                    return;
+                }
+            }
+        } catch (e) {}
+    }
+    transportMode = 'cloud-mqtt';
+    connectCloudBroker();
+}
+
+function connectDirectServer() {
+    if (directWs) {
+        try { directWs.close(); } catch (e) {}
+        directWs = null;
+    }
+    const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const wsUrl = wsProto + location.host;
+    updateConnection('connecting', 'Connecting to Direct Radmin/LAN Server...');
+    directWs = new WebSocket(wsUrl);
+
+    directWs.onopen = () => {
+        const radminTip = (directServerUrls && directServerUrls.radmin && directServerUrls.radmin.length > 0)
+            ? ` (Radmin Ready: ${directServerUrls.radmin[0].ip}:3000)`
+            : '';
+        updateConnection('connected', `Direct Server Ready — Zero Cloud Hop${radminTip}`);
+        startPing();
+        directWs.send(JSON.stringify({ type: 'LIST_ROOMS' }));
+
+        const params = new URLSearchParams(location.search);
+        const autoRoom = params.get('room');
+        if (autoRoom && !currentRoomCode) {
+            document.getElementById('roomCodeInput').value = autoRoom.toUpperCase();
+            window.history.replaceState({}, document.title, location.pathname);
+            setTimeout(() => joinRoom(autoRoom.toUpperCase()), 150);
+        }
+    };
+
+    directWs.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch (err) { return; }
+        if (!msg) return;
+
+        switch (msg.type) {
+            case 'ROOMS_LIST':
+                renderPublicRooms(msg.rooms || []);
+                break;
+
+            case 'ROOM_CREATED':
+                currentRoomCode = msg.roomCode;
+                myPlayerIndex = 1;
+                matchStarted = false;
+                updateConnection('connected', `Hosting Room ${currentRoomCode} (Direct Server)`);
+                document.getElementById('roomCodeText').textContent = currentRoomCode;
+                document.getElementById('roomCodeDisplay').classList.add('visible');
+                document.getElementById('btnCreate').disabled = true;
+                document.getElementById('btnCreate').textContent = 'Waiting for Challenger...';
+                if (directServerUrls && directServerUrls.radmin && directServerUrls.radmin.length > 0) {
+                    showStatus('waiting', `Room ${currentRoomCode} LIVE! Player 2 opens: ${directServerUrls.radmin[0].url}/?room=${currentRoomCode}`);
+                } else {
+                    showStatus('waiting', `Room ${currentRoomCode} LIVE on Direct Server! Share Code or Invite Link with Player 2.`);
+                }
+                break;
+
+            case 'MATCH_START':
+                if (msg.playerIndex) myPlayerIndex = msg.playerIndex;
+                currentRoomCode = msg.roomCode || currentRoomCode;
+                hostNickname = msg.hostName || 'Player 1';
+                guestNickname = msg.guestName || getNickname();
+                if (!matchStarted) {
+                    matchStarted = true;
+                    clearRoomTimers();
+                    gameMode = 'online';
+                    updateConnection('connected', `Direct Arena (Room ${currentRoomCode})`);
+                    showNotification(`⚔️ ${hostNickname} vs ${guestNickname}!`);
+                    startGame(hostNickname, guestNickname);
+                }
+                break;
+
+            case 'ERROR':
+                clearRoomTimers();
+                showStatus('error', msg.message || 'Room error');
+                showNotification(`❌ ${msg.message || 'Connection error'}`);
+                updateConnection('connected', 'Direct Server Ready');
+                break;
+
+            case 'OPPONENT_LEFT':
+                handleRoomMessage({ type: 'LEAVE_ROOM' });
+                break;
+
+            default:
+                handleRoomMessage(msg);
+                break;
+        }
+    };
+
+    directWs.onclose = () => {
+        updateConnection('connecting', 'Reconnecting to Direct Server...');
+        setTimeout(() => {
+            if (transportMode === 'direct-ws') connectDirectServer();
+        }, 1500);
+    };
 }
 
 function connectCloudBroker() {
@@ -1389,17 +1512,26 @@ function publishStreamFrame(roomCode, targetPlayerIndex, data) {
 
 function sendToOpponent(data) {
     if (!currentRoomCode || !myPlayerIndex) return false;
-    const targetPlayer = myPlayerIndex === 1 ? 2 : 1;
-    // Route fallback video frames over the separate mqttStreamClient so control/input/ping socket stays 100% uncongested!
-    if (data.type === 'CANVAS_FRAME') {
-        return publishStreamFrame(currentRoomCode, targetPlayer, data);
-    }
-    // Use WebRTC DataChannel first for inputs/ping when open
-    if (dataChannel && dataChannel.readyState === 'open' && (data.type === 'INPUT' || data.type === 'DC_PING' || data.type === 'DC_PONG')) {
+    // Use WebRTC DataChannel first for fast UDP game traffic when open
+    if (dataChannel && dataChannel.readyState === 'open' && (data.type === 'INPUT' || data.type === 'DC_PING' || data.type === 'DC_PONG' || data.type === 'SET_STREAM_QUALITY')) {
         try {
             dataChannel.send(JSON.stringify(data));
             return true;
         } catch (e) {}
+    }
+    if (transportMode === 'direct-ws') {
+        if (directWs && directWs.readyState === WebSocket.OPEN) {
+            try {
+                directWs.send(JSON.stringify(data));
+                return true;
+            } catch (e) {}
+        }
+        return false;
+    }
+    const targetPlayer = myPlayerIndex === 1 ? 2 : 1;
+    // Route fallback video frames over the separate mqttStreamClient so control/input/ping socket stays 100% uncongested!
+    if (data.type === 'CANVAS_FRAME') {
+        return publishStreamFrame(currentRoomCode, targetPlayer, data);
     }
     return publishCloud(getPlayerInboxTopic(currentRoomCode, targetPlayer), data);
 }
@@ -1444,7 +1576,7 @@ function handleLobbyMessage(msg) {
 }
 
 function announcePublicRoom(isOpen) {
-    if (!currentRoomCode) return;
+    if (!currentRoomCode || transportMode === 'direct-ws') return;
     publishCloud(getLobbyTopic(), {
         type: 'LOBBY_ANNOUNCE',
         roomCode: currentRoomCode,
@@ -1482,6 +1614,13 @@ function renderPublicRooms(rooms) {
 }
 
 function refreshRooms() {
+    if (transportMode === 'direct-ws') {
+        if (directWs && directWs.readyState === WebSocket.OPEN) {
+            directWs.send(JSON.stringify({ type: 'LIST_ROOMS' }));
+        }
+        showNotification('🔄 Refreshed public rooms list!');
+        return;
+    }
     pruneAndRenderPublicRooms();
     publishCloud(getLobbyTopic(), { type: 'LOBBY_QUERY', fromId: CLIENT_ID });
     showNotification('🔄 Refreshed public rooms list!');
@@ -1503,6 +1642,22 @@ function createRoom() {
     clearRoomTimers();
     cleanupWebRTC();
 
+    hostNickname = getNickname();
+    currentRoomIsPublic = document.getElementById('publicRoomCheck').checked;
+
+    if (transportMode === 'direct-ws') {
+        if (!directWs || directWs.readyState !== WebSocket.OPEN) {
+            showStatus('error', 'Connecting to Direct Server — try again in a second.');
+            return;
+        }
+        directWs.send(JSON.stringify({
+            type: 'CREATE_ROOM',
+            nickname: hostNickname,
+            isPublic: currentRoomIsPublic
+        }));
+        return;
+    }
+
     if (currentRoomCode && myPlayerIndex && mqttClient) {
         try { mqttClient.unsubscribe(getPlayerInboxTopic(currentRoomCode, myPlayerIndex)); } catch (e) {}
     }
@@ -1511,8 +1666,6 @@ function createRoom() {
     currentRoomCode = code;
     myPlayerIndex = 1;
     matchStarted = false;
-    hostNickname = getNickname();
-    currentRoomIsPublic = document.getElementById('publicRoomCheck').checked;
 
     if (mqttClient) {
         mqttClient.subscribe(getPlayerInboxTopic(code, 1), { qos: 0 });
@@ -1544,6 +1697,25 @@ function joinRoom(customCode) {
 
     clearRoomTimers();
     cleanupWebRTC();
+    guestNickname = getNickname();
+
+    if (transportMode === 'direct-ws') {
+        if (!directWs || directWs.readyState !== WebSocket.OPEN) {
+            showStatus('error', 'Connecting to Direct Server — please wait...');
+            return;
+        }
+        currentRoomCode = code;
+        myPlayerIndex = 2;
+        matchStarted = false;
+        showStatus('waiting', `Joining Room ${code}...`);
+        updateConnection('connecting', `Joining Room ${code}...`);
+        directWs.send(JSON.stringify({
+            type: 'JOIN_ROOM',
+            roomCode: code,
+            nickname: guestNickname
+        }));
+        return;
+    }
 
     if (currentRoomCode && myPlayerIndex && mqttClient) {
         try { mqttClient.unsubscribe(getPlayerInboxTopic(currentRoomCode, myPlayerIndex)); } catch (e) {}
@@ -1555,7 +1727,6 @@ function joinRoom(customCode) {
     currentRoomCode = code;
     myPlayerIndex = 2;
     matchStarted = false;
-    guestNickname = getNickname();
 
     showStatus('waiting', `Joining Room ${code}...`);
     updateConnection('connecting', `Joining Room ${code}...`);
@@ -1600,6 +1771,18 @@ function joinRoom(customCode) {
 }
 
 function quickMatch() {
+    if (transportMode === 'direct-ws') {
+        if (!directWs || directWs.readyState !== WebSocket.OPEN) {
+            showStatus('error', 'Connecting to Direct Server...');
+            return;
+        }
+        clearRoomTimers();
+        cleanupWebRTC();
+        showStatus('waiting', 'Searching for opponent on Direct Server...');
+        directWs.send(JSON.stringify({ type: 'QUICK_MATCH', nickname: getNickname() }));
+        return;
+    }
+
     pruneAndRenderPublicRooms();
     const openRooms = Array.from(discoveredPublicRooms.values());
     if (openRooms.length > 0) {
@@ -1629,19 +1812,48 @@ function joinSpecificRoom(code) {
     joinRoom(code);
 }
 
+function copyTextSafe(text, tooltipLabel) {
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => {
+            showCopyTooltip(tooltipLabel);
+        }).catch(() => fallbackCopy(text, tooltipLabel));
+    } else {
+        fallbackCopy(text, tooltipLabel);
+    }
+}
+
+function fallbackCopy(text, tooltipLabel) {
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        showCopyTooltip(tooltipLabel);
+    } catch (e) {}
+}
+
 function copyRoomCode() {
     const code = document.getElementById('roomCodeText').textContent.trim();
-    navigator.clipboard.writeText(code).then(() => {
-        showCopyTooltip('Copied Code!');
-    });
+    copyTextSafe(code, 'Copied Code!');
 }
 
 function copyInviteLink() {
     const code = document.getElementById('roomCodeText').textContent.trim();
-    const url = `${location.origin}${location.pathname}?room=${code}`;
-    navigator.clipboard.writeText(url).then(() => {
-        showCopyTooltip('Invite Link Copied!');
-    });
+    let baseUrl = `${location.origin}${location.pathname}`;
+    if (transportMode === 'direct-ws' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+        if (directServerUrls && directServerUrls.radmin && directServerUrls.radmin.length > 0) {
+            baseUrl = directServerUrls.radmin[0].url + location.pathname;
+        } else if (directServerUrls && directServerUrls.lan && directServerUrls.lan.length > 0) {
+            baseUrl = directServerUrls.lan[0].url + location.pathname;
+        }
+    }
+    const url = `${baseUrl}?room=${code}`;
+    copyTextSafe(url, 'Invite Link Copied!');
 }
 
 function showCopyTooltip(text) {
@@ -1686,8 +1898,8 @@ function handleRoomMessage(msg) {
                     updateConnection('connected', `In Arena (Room ${currentRoomCode})`);
                     showNotification(`⚔️ ${hostNickname} vs ${guestNickname}!`);
                     startGame(hostNickname, guestNickname);
-                } else if (hostRuffleReady) {
-                    initHostWebRTC();
+                } else if (hostRuffleReady && !webrtcConnected) {
+                    maybeStartHostWebRTC();
                 }
             }
             break;
@@ -1722,7 +1934,11 @@ function handleRoomMessage(msg) {
                     img.style.display = 'block';
                     document.getElementById('remoteVideo').style.display = 'none';
                     document.getElementById('gameOverlay').classList.add('hidden');
-                    updateStreamBadge('webrtc', 'Live Arena Stream (Connecting WebRTC 60FPS...)');
+                    if (transportMode === 'direct-ws') {
+                        updateStreamBadge('webrtc', 'Radmin / LAN Direct Stream');
+                    } else {
+                        updateStreamBadge('webrtc', 'Cloud Relay Stream (P2P NAT Blocked)');
+                    }
                 }
                 img.src = msg.frameData;
                 sendToOpponent({ type: 'FRAME_ACK' });
@@ -1754,7 +1970,15 @@ function handleRoomMessage(msg) {
             if (!dataChannel || dataChannel.readyState !== 'open') {
                 const rtt = Date.now() - (msg.clientTime || lastPingTime);
                 const pingEl = document.getElementById('pingDisplay');
-                pingEl.textContent = `Ping: ${rtt}ms`;
+                if (transportMode === 'direct-ws') {
+                    pingEl.textContent = `Radmin/LAN Ping: ${rtt}ms`;
+                } else {
+                    pingEl.textContent = `Relay Ping: ${rtt}ms`;
+                    if (rtt > 350 && !cloudRelayHintShown && gameMode === 'online') {
+                        cloudRelayHintShown = true;
+                        appendChatLine('System', `Notice: WebRTC direct UDP is blocked by router NAT, so traffic is relaying through Europe MQTT (${rtt}ms). To get 10-30ms over Radmin VPN, have Player 1 double-click START_HOST_SERVER.bat and send Player 2 http://<Radmin-IP>:3000 instead of github.io!`, true);
+                    }
+                }
                 pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
             }
             break;
@@ -1769,10 +1993,13 @@ function handleRoomMessage(msg) {
 }
 
 // ── Start Game Session ─────────────────────────────────
+let guestLastOfferAt = 0;
 async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
     document.getElementById('lobby').classList.add('hidden');
     document.getElementById('statusBar').classList.remove('visible');
     document.getElementById('gameScreen').classList.add('visible');
+    cloudRelayHintShown = false;
+    guestLastOfferAt = 0;
 
     const overlay = document.getElementById('gameOverlay');
     const overlayText = document.getElementById('overlayText');
@@ -1801,11 +2028,11 @@ async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
             await waitForRuffleCanvas();
             hostRuffleReady = true;
             overlay.classList.add('hidden');
-            updateStreamBadge('webrtc', 'WebRTC Streaming 60FPS...');
+            updateStreamBadge('webrtc', transportMode === 'direct-ws' ? 'Radmin/LAN Direct + WebRTC...' : 'Connecting WebRTC P2P...');
             startFallbackStreamLoop();
             await initHostWebRTC();
         } else {
-            // GUEST: Receive live WebRTC 60FPS video/audio stream from Host & send inputs
+            // GUEST: Receive live WebRTC video/audio stream from Host & send inputs
             overlayText.textContent = 'Connecting to Player 1 Live Arena Stream...';
             if (rufflePlayer) {
                 rufflePlayer.remove();
@@ -1816,13 +2043,17 @@ async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
             sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
             if (webrtcRetryTimer) clearInterval(webrtcRetryTimer);
             webrtcRetryTimer = setInterval(() => {
-                if (gameMode === 'online' && myPlayerIndex === 2 && !webrtcConnected) {
-                    sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
-                } else {
+                if (gameMode !== 'online' || myPlayerIndex !== 2 || webrtcConnected) {
                     clearInterval(webrtcRetryTimer);
                     webrtcRetryTimer = null;
+                    return;
                 }
-            }, 2500);
+                const iceState = peerConn?.iceConnectionState;
+                const stalled = !peerConn || iceState === 'failed' || iceState === 'closed' || (Date.now() - guestLastOfferAt > 9000);
+                if (stalled) {
+                    sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+                }
+            }, 4500);
         }
     } else {
         // LOCAL PLAY
@@ -1928,12 +2159,61 @@ async function flushPendingIceCandidates() {
     }
 }
 
+function syncWebRTCState() {
+    const connState = peerConn?.connectionState;
+    const iceState = peerConn?.iceConnectionState;
+    const dcOpen = !!(dataChannel && dataChannel.readyState === 'open');
+    const iceConnected = iceState === 'connected' || iceState === 'completed' || connState === 'connected';
+    const isConnected = !!(iceConnected || dcOpen);
+
+    webrtcConnected = isConnected;
+
+    if (isConnected) {
+        if (webrtcRetryTimer) {
+            clearInterval(webrtcRetryTimer);
+            webrtcRetryTimer = null;
+        }
+        if (myPlayerIndex === 2) {
+            const videoEl = document.getElementById('remoteVideo');
+            if (videoEl && videoEl.srcObject) {
+                videoEl.style.display = 'block';
+                document.getElementById('fallbackStreamImg').style.display = 'none';
+                document.getElementById('gameOverlay').classList.add('hidden');
+            }
+        }
+        updateStreamBadge('webrtc', dcOpen ? '⚡ WebRTC P2P Direct (Low Ping)' : '⚡ WebRTC P2P Stream');
+    } else if (iceState === 'failed' || connState === 'failed') {
+        if (transportMode === 'direct-ws') {
+            updateStreamBadge('webrtc', '🟢 Radmin / LAN Direct Server');
+        } else {
+            updateStreamBadge('webrtc', '🟠 Cloud EU Relay (NAT Blocked)');
+        }
+    }
+}
+
+function maybeStartHostWebRTC() {
+    if (!hostRuffleReady || webrtcConnected) return;
+    if (peerConn) {
+        const st = peerConn.connectionState;
+        const ist = peerConn.iceConnectionState;
+        const stillTrying = (st === 'new' || st === 'connecting' || ist === 'new' || ist === 'checking');
+        // Never kill an in-progress handshake early (< 9 seconds)!
+        if (stillTrying && (Date.now() - rtcAttemptStartedAt < 9000)) {
+            return;
+        }
+    }
+    initHostWebRTC();
+}
+
 async function initHostWebRTC() {
     if (!hostRuffleReady) {
         guestReadyReceived = true;
         return;
     }
     cleanupWebRTC();
+    const myRtcId = ++rtcSessionSeq;
+    currentRtcId = myRtcId;
+    rtcAttemptStartedAt = Date.now();
     peerConn = new RTCPeerConnection(RTC_CONFIG);
 
     // Create UDP-style unordered, zero-retransmit DataChannel so Wi-Fi packet loss NEVER stalls subsequent inputs or pings!
@@ -1944,23 +2224,16 @@ async function initHostWebRTC() {
     setupDataChannel(dataChannel);
 
     peerConn.onicecandidate = (e) => {
-        if (e.candidate) {
-            sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
+        if (e.candidate && currentRtcId === myRtcId) {
+            sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', rtcId: myRtcId, candidate: e.candidate } });
         }
     };
 
-    peerConn.onconnectionstatechange = () => {
-        const st = peerConn?.connectionState;
-        if (st === 'connected') {
-            webrtcConnected = true;
-            updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
-        } else if (st === 'failed' || st === 'disconnected') {
-            webrtcConnected = false;
-            updateStreamBadge('webrtc', 'Live Arena Stream');
-        }
-    };
+    peerConn.oniceconnectionstatechange = syncWebRTCState;
+    peerConn.onconnectionstatechange = syncWebRTCState;
 
     const canvas = await waitForRuffleCanvas();
+    if (currentRtcId !== myRtcId || !peerConn) return;
     if (canvas && canvas.captureStream) {
         // BvN 2.6 natively runs at 30 FPS (600x450). Capturing at 30 FPS cuts CPU encode time & Wi-Fi airtime in half!
         canvasCaptureStream = canvas.captureStream(30);
@@ -1982,8 +2255,9 @@ async function initHostWebRTC() {
     }
 
     const offer = await peerConn.createOffer();
+    if (currentRtcId !== myRtcId || !peerConn) return;
     await peerConn.setLocalDescription(offer);
-    sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'OFFER', sdp: peerConn.localDescription } });
+    sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'OFFER', rtcId: myRtcId, sdp: peerConn.localDescription } });
 }
 
 function changeStreamQuality(preset) {
@@ -2026,14 +2300,16 @@ async function handleWebRTCSignal(signal) {
 
     if (signal.type === 'GUEST_READY' && myPlayerIndex === 1) {
         guestReadyReceived = true;
-        if (hostRuffleReady && !webrtcConnected) {
-            await initHostWebRTC();
-        }
+        maybeStartHostWebRTC();
         return;
     }
 
     if (signal.type === 'OFFER' && myPlayerIndex === 2) {
         cleanupWebRTC();
+        const myRtcId = signal.rtcId || (++rtcSessionSeq);
+        currentRtcId = myRtcId;
+        guestLastOfferAt = Date.now();
+        rtcAttemptStartedAt = Date.now();
         peerConn = new RTCPeerConnection(RTC_CONFIG);
 
         peerConn.ondatachannel = (e) => {
@@ -2060,55 +2336,42 @@ async function handleWebRTCSignal(signal) {
                 }
                 s.addTrack(e.track);
             }
-            webrtcConnected = true;
-            videoEl.style.display = 'block';
-            document.getElementById('fallbackStreamImg').style.display = 'none';
-            document.getElementById('gameOverlay').classList.add('hidden');
-            updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+            videoEl.onplaying = syncWebRTCState;
             applyGameVolume();
             videoEl.play().catch(() => {
                 videoEl.muted = true;
                 videoEl.play().catch(() => {});
                 document.getElementById('btnUnmuteGuest').style.display = 'inline-block';
             });
+            syncWebRTCState();
         };
 
         peerConn.onicecandidate = (e) => {
-            if (e.candidate) {
-                sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
+            if (e.candidate && currentRtcId === myRtcId) {
+                sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', rtcId: myRtcId, candidate: e.candidate } });
             }
         };
 
-        peerConn.onconnectionstatechange = () => {
-            const st = peerConn?.connectionState;
-            if (st === 'connected') {
-                webrtcConnected = true;
-                if (webrtcRetryTimer) {
-                    clearInterval(webrtcRetryTimer);
-                    webrtcRetryTimer = null;
-                }
-                updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
-            } else if (st === 'failed' || st === 'disconnected') {
-                webrtcConnected = false;
-                updateStreamBadge('webrtc', 'Live Arena Stream');
-            }
-        };
+        peerConn.oniceconnectionstatechange = syncWebRTCState;
+        peerConn.onconnectionstatechange = syncWebRTCState;
 
         await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         await flushPendingIceCandidates();
         const answer = await peerConn.createAnswer();
         await peerConn.setLocalDescription(answer);
-        sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ANSWER', sdp: peerConn.localDescription } });
+        sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'ANSWER', rtcId: myRtcId, sdp: peerConn.localDescription } });
         return;
     }
 
     if (signal.type === 'ANSWER' && myPlayerIndex === 1 && peerConn) {
+        if (signal.rtcId && currentRtcId && signal.rtcId !== currentRtcId) return;
         await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         await flushPendingIceCandidates();
         return;
     }
 
     if (signal.type === 'ICE' && signal.candidate) {
+        if (signal.rtcId && currentRtcId && signal.rtcId !== currentRtcId) return;
         if (peerConn && peerConn.remoteDescription && peerConn.remoteDescription.type) {
             try {
                 await peerConn.addIceCandidate(new RTCIceCandidate(signal.candidate));
@@ -2123,13 +2386,11 @@ let lastRemoteInputSeq = 0;
 function setupDataChannel(dc) {
     lastRemoteInputSeq = 0;
     dc.onopen = () => {
-        webrtcConnected = true;
-        if (webrtcRetryTimer) {
-            clearInterval(webrtcRetryTimer);
-            webrtcRetryTimer = null;
-        }
-        updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+        syncWebRTCState();
+        lastPingTime = Date.now();
+        try { dc.send(JSON.stringify({ type: 'DC_PING', clientTime: lastPingTime })); } catch (e) {}
     };
+    dc.onclose = syncWebRTCState;
     dc.onmessage = (e) => {
         try {
             const msg = JSON.parse(e.data);
@@ -2149,7 +2410,7 @@ function setupDataChannel(dc) {
     };
 }
 
-// ACK-paced, downscaled (380x285 WebP ~5KB) fallback stream so WebSocket signaling/ping is NEVER congested!
+// ACK-paced fallback stream (faster crisp frames on Direct Radmin/LAN server, ultra-light on Cloud EU fallback!)
 let fallbackScaleCanvas = null;
 let fallbackScaleCtx = null;
 let fallbackStartTime = 0;
@@ -2164,35 +2425,47 @@ function startFallbackStreamLoop() {
 
     if (!fallbackScaleCanvas) {
         fallbackScaleCanvas = document.createElement('canvas');
-        fallbackScaleCanvas.width = 380;
-        fallbackScaleCanvas.height = 285;
+        fallbackScaleCanvas.width = 480;
+        fallbackScaleCanvas.height = 360;
         fallbackScaleCtx = fallbackScaleCanvas.getContext('2d', { alpha: false });
     }
 
     fallbackInterval = setInterval(() => {
         if (gameMode !== 'online' || myPlayerIndex !== 1) return;
         if (webrtcConnected) return;
-        // Give direct WebRTC P2P 2.2 seconds of zero-traffic priority to complete handshake cleanly
-        if (Date.now() - fallbackStartTime < 2200) return;
-        // Wait for Player 2's ACK (or 380ms timeout) so we never queue up frames on Wi-Fi!
-        if (!window.__bvnFallbackAcked && (Date.now() - lastFallbackSentAt < 380)) return;
+
+        const isDirect = (transportMode === 'direct-ws');
+        const waitMs = isDirect ? 1200 : 2800;
+        if (Date.now() - fallbackStartTime < waitMs) return;
+
+        const ackTimeout = isDirect ? 220 : 380;
+        if (!window.__bvnFallbackAcked && (Date.now() - lastFallbackSentAt < ackTimeout)) return;
+
+        const targetW = isDirect ? 480 : 360;
+        const targetH = isDirect ? 360 : 270;
+        if (fallbackScaleCanvas.width !== targetW) {
+            fallbackScaleCanvas.width = targetW;
+            fallbackScaleCanvas.height = targetH;
+        }
 
         const canvas = getRuffleCanvas();
         if (!canvas || !fallbackScaleCtx) return;
         try {
-            fallbackScaleCtx.drawImage(canvas, 0, 0, 380, 285);
-            const dataUrl = fallbackScaleCanvas.toDataURL('image/webp', 0.42);
+            fallbackScaleCtx.drawImage(canvas, 0, 0, targetW, targetH);
+            const dataUrl = fallbackScaleCanvas.toDataURL('image/webp', isDirect ? 0.58 : 0.40);
             if (dataUrl && dataUrl.length > 100) {
                 window.__bvnFallbackAcked = false;
                 lastFallbackSentAt = Date.now();
                 sendToOpponent({ type: 'CANVAS_FRAME', frameData: dataUrl });
             }
         } catch (e) {}
-    }, 85);
+    }, 48);
 }
 
 function cleanupWebRTC() {
     webrtcConnected = false;
+    currentRtcId = null;
+    videoRtpSender = null;
     pendingIceCandidates = [];
     if (dataChannel) {
         try { dataChannel.close(); } catch (e) {}
@@ -2389,11 +2662,8 @@ function broadcastMyActions(stateObj) {
             return;
         } catch (e) {}
     }
-    // Fallback to cloud broker only when WebRTC DataChannel is not yet open
-    if (currentRoomCode && myPlayerIndex) {
-        const targetPlayer = myPlayerIndex === 1 ? 2 : 1;
-        publishCloud(getPlayerInboxTopic(currentRoomCode, targetPlayer), payload);
-    }
+    // Fallback to direct server WebSocket (Radmin/LAN) or cloud broker when WebRTC DataChannel is not yet open
+    sendToOpponent(payload);
 }
 
 // Minimum key hold time (65ms = ~2 frames at 30 FPS) so rapid taps are guaranteed to be observed
@@ -2557,6 +2827,9 @@ function leaveGame() {
     if (currentRoomCode && myPlayerIndex && mqttClient) {
         try { mqttClient.unsubscribe(getPlayerInboxTopic(currentRoomCode, myPlayerIndex)); } catch (e) {}
     }
+    if (currentRoomCode && mqttStreamClient) {
+        try { mqttStreamClient.unsubscribe(getPlayerStreamTopic(currentRoomCode, 2)); } catch (e) {}
+    }
     clearRoomTimers();
     releaseAllSyntheticP2Keys();
     cleanupWebRTC();
@@ -2587,9 +2860,13 @@ function leaveGame() {
     document.getElementById('btnCreate').disabled = false;
     document.getElementById('btnCreate').textContent = 'Create Room';
     document.getElementById('chatMessages').innerHTML = '';
+    document.getElementById('pingDisplay').style.display = '';
+    document.getElementById('pingDisplay').textContent = 'Ping: —';
     currentRoomCode = null;
     myPlayerIndex = null;
-    updateConnection('connected', 'Online Arena Ready (Global WebRTC + WSS)');
+    updateConnection('connected', transportMode === 'direct-ws'
+        ? 'Direct Server Ready — Zero Cloud Hop'
+        : 'Online Arena Ready (Global WebRTC + WSS)');
     ACTIONS.forEach(a => { p1ActionState[a] = false; p2ActionState[a] = false; });
 }
 
@@ -2629,7 +2906,7 @@ function escapeHtml(str) {
 // ── Start ──────────────────────────────────────────────
 syncVolumeUI();
 applyGameVolume();
-connectCloudBroker();
+startNetwork();
 </script>
 </body>
 </html>
