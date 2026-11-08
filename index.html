@@ -1584,7 +1584,12 @@ function handleRoomMessage(msg) {
                     updateStreamBadge('webrtc', 'Live Arena Stream (Connecting WebRTC 60FPS...)');
                 }
                 img.src = msg.frameData;
+                sendToOpponent({ type: 'FRAME_ACK' });
             }
+            break;
+
+        case 'FRAME_ACK':
+            window.__bvnFallbackAcked = true;
             break;
 
         case 'CHAT':
@@ -1781,9 +1786,10 @@ async function initHostWebRTC() {
     cleanupWebRTC();
     peerConn = new RTCPeerConnection(RTC_CONFIG);
 
-    // Create low-latency DataChannel for Guest inputs & Host HUD updates
+    // Create UDP-style unordered, zero-retransmit DataChannel so Wi-Fi packet loss NEVER stalls subsequent inputs or pings!
     dataChannel = peerConn.createDataChannel('bvn-inputs', {
-        ordered: true
+        ordered: false,
+        maxRetransmits: 0
     });
     setupDataChannel(dataChannel);
 
@@ -1815,7 +1821,20 @@ async function initHostWebRTC() {
             if (track.kind === 'video' && 'contentHint' in track) {
                 track.contentHint = 'motion';
             }
-            peerConn.addTrack(track, canvasCaptureStream);
+            const sender = peerConn.addTrack(track, canvasCaptureStream);
+            if (track.kind === 'video' && sender && sender.getParameters && sender.setParameters) {
+                try {
+                    const params = sender.getParameters() || {};
+                    params.degradationPreference = 'maintain-framerate';
+                    if (params.encodings && params.encodings.length > 0) {
+                        params.encodings[0].maxBitrate = 900000; // 900 kbps prevents Wi-Fi router bufferbloat
+                        params.encodings[0].maxFramerate = 60;
+                        params.encodings[0].priority = 'high';
+                        params.encodings[0].networkPriority = 'high';
+                    }
+                    sender.setParameters(params).catch(() => {});
+                } catch (e) {}
+            }
         });
     }
 
@@ -1845,6 +1864,11 @@ async function handleWebRTCSignal(signal) {
         };
 
         peerConn.ontrack = (e) => {
+            // Minimize WebRTC receiver jitter buffer delay on Wi-Fi
+            if (e.receiver) {
+                try { e.receiver.playoutDelayHint = 0; } catch (err) {}
+                try { e.receiver.jitterBufferTarget = 0; } catch (err) {}
+            }
             const videoEl = document.getElementById('remoteVideo');
             if (e.streams && e.streams[0]) {
                 if (videoEl.srcObject !== e.streams[0]) {
@@ -1917,7 +1941,9 @@ async function handleWebRTCSignal(signal) {
     }
 }
 
+let lastRemoteInputSeq = 0;
 function setupDataChannel(dc) {
+    lastRemoteInputSeq = 0;
     dc.onopen = () => {
         webrtcConnected = true;
         if (webrtcRetryTimer) {
@@ -1930,6 +1956,8 @@ function setupDataChannel(dc) {
         try {
             const msg = JSON.parse(e.data);
             if (msg.type === 'INPUT') {
+                if (msg.seq && msg.seq < lastRemoteInputSeq) return;
+                if (msg.seq) lastRemoteInputSeq = msg.seq;
                 handleRemoteActions(msg.playerIndex, msg.actions);
             } else if (msg.type === 'DC_PING') {
                 dc.send(JSON.stringify({ type: 'DC_PONG', clientTime: msg.clientTime }));
@@ -1943,21 +1971,46 @@ function setupDataChannel(dc) {
     };
 }
 
-// Streams compressed JPEG frames when WebRTC UDP P2P is still connecting or blocked across strict NATs
+// ACK-paced, downscaled (380x285 WebP ~5KB) fallback stream so WebSocket signaling/ping is NEVER congested!
+let fallbackScaleCanvas = null;
+let fallbackScaleCtx = null;
+let fallbackStartTime = 0;
+let lastFallbackSentAt = 0;
+window.__bvnFallbackAcked = true;
+
 function startFallbackStreamLoop() {
     if (fallbackInterval) clearInterval(fallbackInterval);
+    fallbackStartTime = Date.now();
+    window.__bvnFallbackAcked = true;
+    lastFallbackSentAt = 0;
+
+    if (!fallbackScaleCanvas) {
+        fallbackScaleCanvas = document.createElement('canvas');
+        fallbackScaleCanvas.width = 380;
+        fallbackScaleCanvas.height = 285;
+        fallbackScaleCtx = fallbackScaleCanvas.getContext('2d', { alpha: false });
+    }
+
     fallbackInterval = setInterval(() => {
         if (gameMode !== 'online' || myPlayerIndex !== 1) return;
         if (webrtcConnected) return;
+        // Give direct WebRTC P2P 2.2 seconds of zero-traffic priority to complete handshake cleanly
+        if (Date.now() - fallbackStartTime < 2200) return;
+        // Wait for Player 2's ACK (or 380ms timeout) so we never queue up frames on Wi-Fi!
+        if (!window.__bvnFallbackAcked && (Date.now() - lastFallbackSentAt < 380)) return;
+
         const canvas = getRuffleCanvas();
-        if (!canvas) return;
+        if (!canvas || !fallbackScaleCtx) return;
         try {
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.55);
+            fallbackScaleCtx.drawImage(canvas, 0, 0, 380, 285);
+            const dataUrl = fallbackScaleCanvas.toDataURL('image/webp', 0.42);
             if (dataUrl && dataUrl.length > 100) {
+                window.__bvnFallbackAcked = false;
+                lastFallbackSentAt = Date.now();
                 sendToOpponent({ type: 'CANVAS_FRAME', frameData: dataUrl });
             }
         } catch (e) {}
-    }, 55);
+    }, 85);
 }
 
 function cleanupWebRTC() {
@@ -2142,15 +2195,23 @@ function broadcastMyActions(stateObj) {
     const payload = {
         type: 'INPUT',
         playerIndex: myPlayerIndex,
-        actions: stateObj,
+        actions: { ...stateObj },
         seq: ++inputSeq
     };
     if (dataChannel && dataChannel.readyState === 'open') {
+        const raw = JSON.stringify(payload);
         try {
-            dataChannel.send(JSON.stringify(payload));
+            dataChannel.send(raw);
+            // Fast 14ms UDP redundant send so single Wi-Fi packet loss never drops an input without TCP head-of-line blocking
+            setTimeout(() => {
+                if (dataChannel && dataChannel.readyState === 'open' && payload.seq === inputSeq) {
+                    try { dataChannel.send(raw); } catch (e) {}
+                }
+            }, 14);
+            return;
         } catch (e) {}
     }
-    // Always also publish to opponent inbox so inputs never drop if DataChannel is still connecting
+    // Fallback to cloud broker only when WebRTC DataChannel is not yet open
     if (currentRoomCode && myPlayerIndex) {
         const targetPlayer = myPlayerIndex === 1 ? 2 : 1;
         publishCloud(getPlayerInboxTopic(currentRoomCode, targetPlayer), payload);
