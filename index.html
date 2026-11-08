@@ -631,6 +631,75 @@
         }
         .footer a { color: #f39c12; text-decoration: none; }
 
+        /* Volume Controller */
+        .volume-controller {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #171b30;
+            border: 1px solid #2b3252;
+            border-radius: 6px;
+            padding: 4px 10px;
+            user-select: none;
+        }
+        .volume-mute-btn {
+            background: transparent;
+            border: none;
+            color: #e2e8f0;
+            font-size: 1rem;
+            line-height: 1;
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 4px;
+            transition: background .15s, transform .1s;
+        }
+        .volume-mute-btn:hover {
+            background: rgba(243, 156, 18, 0.18);
+            transform: scale(1.08);
+        }
+        .volume-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 88px;
+            height: 6px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #f39c12 80%, #2b3252 80%);
+            outline: none;
+            cursor: pointer;
+        }
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #f39c12;
+            border: 2px solid #fff;
+            box-shadow: 0 0 6px rgba(243,156,18,.6);
+            cursor: pointer;
+            transition: transform .1s;
+        }
+        .volume-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+        .volume-slider::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #f39c12;
+            border: 2px solid #fff;
+            box-shadow: 0 0 6px rgba(243,156,18,.6);
+            cursor: pointer;
+        }
+        .volume-pct {
+            font-size: .76rem;
+            font-weight: 700;
+            color: #f39c12;
+            min-width: 34px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
         @media (max-width: 920px) {
             .lobby-grid { grid-template-columns: 1fr; }
             .arena-layout { grid-template-columns: 1fr; }
@@ -643,9 +712,17 @@
 <!-- ═══════════════════ HEADER ═══════════════════ -->
 <div class="header">
     <div class="header-title">⚔️ Bleach vs Naruto 2.6 — Online PvP</div>
-    <div class="header-status">
-        <span class="connection-dot connecting" id="connDot"></span>
-        <span id="connText">Connecting to server...</span>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div class="volume-controller" title="Game Audio Volume">
+            <button type="button" class="volume-mute-btn" id="btnMuteHeader" onclick="toggleGameMute()" title="Mute / Unmute (M)">🔊</button>
+            <input type="range" class="volume-slider" id="volSliderHeader" min="0" max="100" value="80"
+                   oninput="setGameVolume(this.value)" onchange="focusGame()">
+            <span class="volume-pct" id="volPctHeader">80%</span>
+        </div>
+        <div class="header-status">
+            <span class="connection-dot connecting" id="connDot"></span>
+            <span id="connText">Connecting to server...</span>
+        </div>
     </div>
 </div>
 
@@ -774,9 +851,15 @@
             </div>
 
             <div class="controls-bar">
-                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <button class="btn-secondary" onclick="toggleFullscreen()">🖥️ Fullscreen</button>
                     <button class="btn-secondary" onclick="focusGame()">🎯 Focus Controls</button>
+                    <div class="volume-controller" title="Game Audio Volume">
+                        <button type="button" class="volume-mute-btn" id="btnMuteGame" onclick="toggleGameMute()" title="Mute / Unmute">🔊</button>
+                        <input type="range" class="volume-slider" id="volSliderGame" min="0" max="100" value="80"
+                               oninput="setGameVolume(this.value)" onchange="focusGame()">
+                        <span class="volume-pct" id="volPctGame">80%</span>
+                    </div>
                     <button class="btn-secondary" id="btnUnmuteGuest" style="display:none;" onclick="unmuteRemoteVideo()">🔊 Enable Audio</button>
                 </div>
                 <div style="font-size:.8rem; color:#8a94ad;" id="inputStatusNote">
@@ -870,25 +953,37 @@
     };
 })();
 
-// 2. Hook WebAudio so Player 1's Ruffle game audio can be captured into the WebRTC MediaStream for Player 2
+// 2. Hook WebAudio so:
+//    - Player 1's Ruffle game audio is captured at full 100% level into `window.__bvnAudioStreamDest` for Player 2's WebRTC stream
+//    - Player 1's local speaker output routes through `window.__bvnMasterGain` so Player 1's Volume Controller adjusts local speakers independently!
 window.__bvnAudioStreamDest = null;
 window.__bvnAudioCtx = null;
+window.__bvnMasterGain = null;
+window.__bvnVolume = (function() {
+    const saved = parseFloat(localStorage.getItem('bvn_volume'));
+    return (!isNaN(saved) && saved >= 0 && saved <= 1) ? saved : 0.8;
+})();
+window.__bvnMuted = localStorage.getItem('bvn_muted') === 'true';
+
 (function hookWebAudio() {
     const OrigAudioContext = window.AudioContext || window.webkitAudioContext;
     if (!OrigAudioContext) return;
     const origConnect = AudioNode.prototype.connect;
     AudioNode.prototype.connect = function(dest, ...args) {
-        const result = origConnect.call(this, dest, ...args);
         try {
-            if (dest && dest.context && dest === dest.context.destination) {
+            if (dest && dest.context && dest === dest.context.destination && this !== window.__bvnMasterGain) {
                 if (!window.__bvnAudioStreamDest || window.__bvnAudioCtx !== dest.context) {
                     window.__bvnAudioCtx = dest.context;
                     window.__bvnAudioStreamDest = dest.context.createMediaStreamDestination();
+                    window.__bvnMasterGain = dest.context.createGain();
+                    window.__bvnMasterGain.gain.value = window.__bvnMuted ? 0 : window.__bvnVolume;
+                    origConnect.call(window.__bvnMasterGain, dest.context.destination);
                 }
                 origConnect.call(this, window.__bvnAudioStreamDest);
+                return origConnect.call(this, window.__bvnMasterGain, ...args);
             }
         } catch (e) {}
-        return result;
+        return origConnect.call(this, dest, ...args);
     };
 })();
 
@@ -1768,6 +1863,7 @@ async function handleWebRTCSignal(signal) {
             document.getElementById('fallbackStreamImg').style.display = 'none';
             document.getElementById('gameOverlay').classList.add('hidden');
             updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+            applyGameVolume();
             videoEl.play().catch(() => {
                 videoEl.muted = true;
                 videoEl.play().catch(() => {});
@@ -1890,10 +1986,88 @@ function reconnectWebRTC() {
 }
 
 function unmuteRemoteVideo() {
+    window.__bvnMuted = false;
+    if (window.__bvnVolume <= 0) {
+        window.__bvnVolume = 0.8;
+        localStorage.setItem('bvn_volume', '0.8');
+    }
+    localStorage.setItem('bvn_muted', 'false');
+    syncVolumeUI();
+    applyGameVolume();
     const videoEl = document.getElementById('remoteVideo');
     videoEl.muted = false;
     videoEl.play().catch(() => {});
     document.getElementById('btnUnmuteGuest').style.display = 'none';
+    focusGame();
+}
+
+// ── Volume Controller (Works for Host Ruffle, Local Play, and Guest WebRTC Stream) ──
+function setGameVolume(percentVal) {
+    const pct = Math.max(0, Math.min(100, parseInt(percentVal, 10) || 0));
+    window.__bvnVolume = pct / 100;
+    window.__bvnMuted = (pct === 0);
+    localStorage.setItem('bvn_volume', String(window.__bvnVolume));
+    localStorage.setItem('bvn_muted', String(window.__bvnMuted));
+    syncVolumeUI();
+    applyGameVolume();
+}
+
+function toggleGameMute() {
+    window.__bvnMuted = !window.__bvnMuted;
+    if (!window.__bvnMuted && window.__bvnVolume <= 0) {
+        window.__bvnVolume = 0.8;
+        localStorage.setItem('bvn_volume', '0.8');
+    }
+    localStorage.setItem('bvn_muted', String(window.__bvnMuted));
+    syncVolumeUI();
+    applyGameVolume();
+    focusGame();
+}
+
+function applyGameVolume() {
+    const effectiveVol = window.__bvnMuted ? 0 : window.__bvnVolume;
+
+    // 1. Host / Local Play WebAudio Master Gain (independent of Player 2's WebRTC stream!)
+    if (window.__bvnMasterGain && window.__bvnAudioCtx) {
+        try {
+            window.__bvnMasterGain.gain.setTargetAtTime(effectiveVol, window.__bvnAudioCtx.currentTime, 0.015);
+        } catch (e) {
+            window.__bvnMasterGain.gain.value = effectiveVol;
+        }
+        if (!window.__bvnMuted && effectiveVol > 0 && window.__bvnAudioCtx.state === 'suspended') {
+            window.__bvnAudioCtx.resume().catch(() => {});
+        }
+    }
+
+    // 2. Player 2 (Guest) WebRTC Video/Audio Stream
+    const videoEl = document.getElementById('remoteVideo');
+    if (videoEl) {
+        videoEl.volume = Math.max(0, Math.min(1, effectiveVol));
+        videoEl.muted = window.__bvnMuted || effectiveVol === 0;
+        if (!videoEl.muted && videoEl.srcObject) {
+            videoEl.play().catch(() => {});
+            const btnUnmute = document.getElementById('btnUnmuteGuest');
+            if (btnUnmute) btnUnmute.style.display = 'none';
+        }
+    }
+}
+
+function syncVolumeUI() {
+    const effectivePct = window.__bvnMuted ? 0 : Math.round(window.__bvnVolume * 100);
+    const icon = (window.__bvnMuted || effectivePct === 0) ? '🔇' : (effectivePct < 45 ? '🔉' : '🔊');
+    const bgTrack = `linear-gradient(90deg, #f39c12 ${effectivePct}%, #2b3252 ${effectivePct}%)`;
+
+    ['Header', 'Game'].forEach(suffix => {
+        const btn = document.getElementById('btnMute' + suffix);
+        const slider = document.getElementById('volSlider' + suffix);
+        const pctEl = document.getElementById('volPct' + suffix);
+        if (btn) btn.textContent = icon;
+        if (slider) {
+            slider.value = String(effectivePct);
+            slider.style.background = bgTrack;
+        }
+        if (pctEl) pctEl.textContent = `${effectivePct}%`;
+    });
 }
 
 // ── Input Capture, Relay & Synthetic Ruffle Injection ──
@@ -2214,6 +2388,8 @@ function escapeHtml(str) {
 }
 
 // ── Start ──────────────────────────────────────────────
+syncVolumeUI();
+applyGameVolume();
 connectCloudBroker();
 </script>
 </body>
