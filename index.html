@@ -948,11 +948,22 @@ function ensureRuffleFocused() {
     };
 </script>
 <script src="https://unpkg.com/@ruffle-rs/ruffle"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 
-<!-- ═══════════════════ ONLINE PVP ENGINE ═══════════════════ -->
+<!-- ═══════════════════ SERVERLESS WEBRTC ONLINE PVP ENGINE (GITHUB PAGES READY) ═══════════════════ -->
 <script>
 // ── State ──────────────────────────────────────────────
-let ws = null;
+const PEER_PREFIX = 'bvn26-pvp-room-';
+const QUICK_ROOMS = ['QUICK1', 'QUICK2', 'QUICK3', 'QUICK4'];
+
+let peer = null;
+let p2pDataConn = null;
+let p2pMediaCall = null;
+let guestPeerId = null;
+let hostNickname = 'Player 1';
+let guestNickname = 'Player 2';
+
+let ws = null; // Optional local server WebSocket (ignored on GitHub Pages static hosting)
 let rufflePlayer = null;
 let myPlayerIndex = null; // 1 = Host, 2 = Guest, 0 = Local
 let currentRoomCode = null;
@@ -973,9 +984,12 @@ let webrtcRetryTimer = null;
 let canvasCaptureStream = null;
 
 const RTC_CONFIG = {
+    iceCandidatePoolSize: 10,
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' }
     ]
 };
@@ -1043,140 +1057,59 @@ function getNickname() {
     return document.getElementById('nicknameInput').value.trim() || 'Fighter';
 }
 
-// ── WebSocket Connection ───────────────────────────────
-function connectWS() {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}`);
-
-    ws.onopen = () => {
-        updateConnection('connected', 'Online Server Ready');
-        startPing();
-        // Auto-join if ?room=CODE is in URL
-        const params = new URLSearchParams(location.search);
-        const autoRoom = params.get('room');
-        if (autoRoom && !currentRoomCode) {
-            document.getElementById('roomCodeInput').value = autoRoom.toUpperCase();
-            joinRoom();
-            window.history.replaceState({}, document.title, location.pathname);
-        }
-    };
-
-    ws.onclose = () => {
-        updateConnection('disconnected', 'Disconnected — reconnecting...');
-        stopPing();
-        setTimeout(connectWS, 2000);
-    };
-
-    ws.onerror = () => {
-        updateConnection('disconnected', 'Connection error');
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const msg = JSON.parse(event.data);
-            handleServerMessage(msg);
-        } catch (e) {}
-    };
+// ── Serverless WebRTC P2P Engine (PeerJS Cloud Broker — Works on GitHub Pages!) ──
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
 }
 
-function sendWS(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
+function initOnlineEngine() {
+    updateConnection('connected', 'WebRTC Cloud Ready (P2P)');
+    startPing();
+    renderPublicRooms([]);
+
+    // Auto-join if ?room=CODE is in URL
+    const params = new URLSearchParams(location.search);
+    const autoRoom = params.get('room');
+    if (autoRoom && !currentRoomCode) {
+        document.getElementById('roomCodeInput').value = autoRoom.toUpperCase();
+        setTimeout(() => joinRoom(), 300);
+        window.history.replaceState({}, document.title, location.pathname);
     }
+}
+
+function sendP2P(data) {
+    if (p2pDataConn && p2pDataConn.open) {
+        try {
+            p2pDataConn.send(data);
+            return true;
+        } catch (e) {}
+    }
+    return false;
 }
 
 function startPing() {
     stopPing();
     pingInterval = setInterval(() => {
         lastPingTime = Date.now();
-        if (dataChannel && dataChannel.readyState === 'open') {
-            try {
-                dataChannel.send(JSON.stringify({ type: 'DC_PING', clientTime: lastPingTime }));
-                return;
-            } catch (e) {}
+        if (p2pDataConn && p2pDataConn.open) {
+            sendP2P({ type: 'DC_PING', clientTime: lastPingTime });
         }
-        sendWS({ type: 'PING', clientTime: lastPingTime });
     }, 2000);
 }
 function stopPing() {
     if (pingInterval) clearInterval(pingInterval);
 }
 
-// ── Server Message Handler ─────────────────────────────
-function handleServerMessage(msg) {
-    switch (msg.type) {
-        case 'ROOMS_LIST':
-            renderPublicRooms(msg.rooms || []);
-            break;
-
-        case 'ROOM_CREATED':
-            currentRoomCode = msg.roomCode;
-            myPlayerIndex = msg.playerIndex;
-            document.getElementById('roomCodeText').textContent = msg.roomCode;
-            document.getElementById('roomCodeDisplay').classList.add('visible');
-            document.getElementById('btnCreate').disabled = true;
-            document.getElementById('btnCreate').textContent = 'Waiting for Challenger...';
-            showStatus('waiting', msg.message);
-            break;
-
-        case 'ROOM_WAITING':
-            myPlayerIndex = msg.playerIndex || 1;
-            showStatus('waiting', msg.message);
-            appendChatLine('System', msg.message, true);
-            releaseAllSyntheticP2Keys();
-            cleanupWebRTC();
-            break;
-
-        case 'MATCH_START':
-            currentRoomCode = msg.roomCode;
-            myPlayerIndex = msg.playerIndex;
-            gameMode = 'online';
-            showStatus('success', `Match starting! ${msg.hostName} (P1) vs ${msg.guestName} (P2)`);
-            showNotification(`⚔️ ${msg.hostName} vs ${msg.guestName}!`);
-            startGame(msg.hostName, msg.guestName);
-            break;
-
-        case 'WEBRTC_SIGNAL':
-            enqueueWebRTCSignal(msg.signal);
-            break;
-
-        case 'REMOTE_INPUT':
-            // Only use WebSocket input if WebRTC DataChannel is not open yet
-            if (!dataChannel || dataChannel.readyState !== 'open') {
-                handleRemoteActions(msg.playerIndex, msg.actions);
-            }
-            break;
-
-        case 'CHAT':
-            appendChatLine(msg.nickname || `Player ${msg.playerIndex}`, msg.text, false, msg.playerIndex);
-            break;
-
-        case 'OPPONENT_LEFT':
-            showNotification('⚠️ Opponent disconnected!');
-            appendChatLine('System', 'Opponent left the arena.', true);
-            releaseAllSyntheticP2Keys();
-            break;
-
-        case 'PONG': {
-            const rtt = Date.now() - (msg.clientTime || lastPingTime);
-            const pingEl = document.getElementById('pingDisplay');
-            pingEl.textContent = `Ping: ${rtt}ms`;
-            pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
-            break;
-        }
-
-        case 'ERROR':
-            showStatus('error', msg.message);
-            showNotification(`❌ ${msg.message}`);
-            break;
-    }
-}
-
-// ── Lobby Functions ────────────────────────────────────
+// ── Lobby Functions (Serverless PeerJS P2P) ────────────
 function renderPublicRooms(rooms) {
     const container = document.getElementById('publicRoomsList');
-    if (!rooms.length) {
-        container.innerHTML = `<div style="color:#556; font-size:.82rem; text-align:center; padding:12px;">No open public rooms right now — click Quick Match or Create Room!</div>`;
+    if (!rooms || !rooms.length) {
+        container.innerHTML = `<div style="color:#8899aa; font-size:.82rem; text-align:center; padding:12px;">⚡ Click <strong>Quick Match</strong> to auto-pair on a global WebRTC lobby slot, or click <strong>Create Room</strong> and share your 6-character code / invite link!</div>`;
         return;
     }
     container.innerHTML = rooms.map(r => `
@@ -1191,30 +1124,154 @@ function renderPublicRooms(rooms) {
 }
 
 function refreshRooms() {
-    sendWS({ type: 'LIST_ROOMS' });
+    showNotification('⚡ Serverless WebRTC Ready — use Quick Match or Room Code!');
 }
 
-function quickMatch() {
-    sendWS({ type: 'QUICK_MATCH', nickname: getNickname() });
+function destroyPeerSession() {
+    if (p2pMediaCall) {
+        try { p2pMediaCall.close(); } catch (e) {}
+        p2pMediaCall = null;
+    }
+    if (p2pDataConn) {
+        try { p2pDataConn.close(); } catch (e) {}
+        p2pDataConn = null;
+    }
+    if (peer) {
+        try { peer.destroy(); } catch (e) {}
+        peer = null;
+    }
+    webrtcConnected = false;
+    guestPeerId = null;
+}
+
+// Create a Host room with a specific 6-char roomCode
+function hostRoomWithCode(roomCode, onUnavailable) {
+    destroyPeerSession();
+    currentRoomCode = roomCode;
+    myPlayerIndex = 1;
+    hostNickname = getNickname();
+
+    showStatus('waiting', `Registering WebRTC Room ${roomCode}...`);
+    updateConnection('connecting', `Creating Room ${roomCode}...`);
+
+    const hostPeerId = PEER_PREFIX + roomCode;
+    peer = new Peer(hostPeerId, { config: RTC_CONFIG });
+
+    peer.on('open', () => {
+        updateConnection('connected', `Hosting Room ${roomCode} (WebRTC P2P)`);
+        document.getElementById('roomCodeText').textContent = roomCode;
+        document.getElementById('roomCodeDisplay').classList.add('visible');
+        document.getElementById('btnCreate').disabled = true;
+        document.getElementById('btnCreate').textContent = 'Waiting for Challenger...';
+        showStatus('waiting', `Room ${roomCode} is LIVE! Share this code or Invite Link with Player 2.`);
+    });
+
+    // Automatically reconnect to PeerJS broker if idle signaling drops on GitHub Pages
+    peer.on('disconnected', () => {
+        if (peer && !peer.destroyed) {
+            try { peer.reconnect(); } catch (e) {}
+        }
+    });
+
+    peer.on('connection', (conn) => {
+        // Challenger connected via WebRTC DataChannel!
+        p2pDataConn = conn;
+        guestPeerId = conn.peer;
+        guestNickname = (conn.metadata && conn.metadata.nickname) || 'Player 2';
+        setupPeerDataConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+        if (err && err.type === 'unavailable-id') {
+            if (typeof onUnavailable === 'function') {
+                onUnavailable();
+            } else {
+                // Retry with a fresh random code
+                hostRoomWithCode(generateRoomCode());
+            }
+            return;
+        }
+        showStatus('error', `WebRTC Error: ${err.type || err.message || 'Connection issue'}`);
+    });
 }
 
 function createRoom() {
-    const isPublic = document.getElementById('publicRoomCheck').checked;
-    sendWS({ type: 'CREATE_ROOM', nickname: getNickname(), isPublic });
+    const code = generateRoomCode();
+    hostRoomWithCode(code);
 }
 
-function joinRoom() {
-    const code = document.getElementById('roomCodeInput').value.trim().toUpperCase();
+function joinRoom(customCode) {
+    const code = (customCode || document.getElementById('roomCodeInput').value).trim().toUpperCase();
     if (!code) {
         showStatus('error', 'Please enter a 6-character room code.');
         return;
     }
-    sendWS({ type: 'JOIN_ROOM', roomCode: code, nickname: getNickname() });
+
+    destroyPeerSession();
+    currentRoomCode = code;
+    myPlayerIndex = 2;
+    guestNickname = getNickname();
+
+    showStatus('waiting', `Connecting to Room ${code} via WebRTC P2P...`);
+    updateConnection('connecting', `Joining Room ${code}...`);
+
+    peer = new Peer({ config: RTC_CONFIG });
+
+    peer.on('open', (myId) => {
+        updateConnection('connected', `Connected (Room ${code})`);
+
+        // Listen for incoming 60 FPS video + audio MediaStream call from Host
+        peer.on('call', (call) => {
+            p2pMediaCall = call;
+            call.answer(); // Answer with no local stream (receive-only)
+            call.on('stream', (remoteStream) => {
+                attachGuestRemoteStream(remoteStream);
+            });
+            call.on('error', () => {});
+        });
+
+        // Open ultra-low-latency WebRTC DataChannel to Host
+        const conn = peer.connect(PEER_PREFIX + code, {
+            reliable: false,
+            serialization: 'json',
+            metadata: { nickname: guestNickname }
+        });
+        p2pDataConn = conn;
+        setupPeerDataConnection(conn);
+    });
+
+    peer.on('disconnected', () => {
+        if (peer && !peer.destroyed) {
+            try { peer.reconnect(); } catch (e) {}
+        }
+    });
+
+    peer.on('error', (err) => {
+        if (err && err.type === 'peer-unavailable') {
+            showStatus('error', `Room "${code}" not found or Host is not online.`);
+            showNotification(`❌ Room "${code}" not found!`);
+            updateConnection('connected', 'WebRTC Cloud Ready (P2P)');
+            return;
+        }
+        showStatus('error', `WebRTC Error: ${err.type || err.message}`);
+    });
+}
+
+// Serverless Quick Match across GitHub Pages players:
+// Tries to claim QUICK1..QUICK4 as Host; if a slot is already occupied by a waiting Host, joins it as Guest!
+function quickMatch(slotIndex = 0) {
+    const slotCode = QUICK_ROOMS[slotIndex % QUICK_ROOMS.length];
+    showStatus('waiting', `Searching for opponent in Quick Match (${slotCode})...`);
+    hostRoomWithCode(slotCode, () => {
+        // Slot is already hosted by someone waiting -> Join it immediately as Player 2!
+        document.getElementById('roomCodeInput').value = slotCode;
+        joinRoom(slotCode);
+    });
 }
 
 function joinSpecificRoom(code) {
     document.getElementById('roomCodeInput').value = code;
-    joinRoom();
+    joinRoom(code);
 }
 
 function copyRoomCode() {
@@ -1253,6 +1310,155 @@ function startLocalGame() {
     startGame('Player 1', 'Player 2');
 }
 
+// ── PeerJS WebRTC DataConnection & MediaStream Handling ──
+function setupPeerDataConnection(conn) {
+    conn.on('open', () => {
+        webrtcConnected = true;
+        updateConnection('connected', `P2P Connected (Room ${currentRoomCode})`);
+        updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+
+        if (myPlayerIndex === 1) {
+            // Host notifies Guest that match is starting and launches Arena
+            sendP2P({
+                type: 'MATCH_START',
+                roomCode: currentRoomCode,
+                hostName: hostNickname,
+                guestName: guestNickname
+            });
+            gameMode = 'online';
+            showNotification(`⚔️ ${hostNickname} vs ${guestNickname}!`);
+            startGame(hostNickname, guestNickname);
+        } else if (myPlayerIndex === 2) {
+            // Guest introduces itself to Host
+            sendP2P({
+                type: 'GUEST_HELLO',
+                nickname: guestNickname,
+                peerId: peer ? peer.id : null
+            });
+        }
+    });
+
+    conn.on('data', (msg) => {
+        if (!msg || typeof msg !== 'object') return;
+
+        switch (msg.type) {
+            case 'GUEST_HELLO':
+                if (myPlayerIndex === 1) {
+                    guestNickname = msg.nickname || guestNickname;
+                    guestPeerId = msg.peerId || conn.peer;
+                    if (hostRuffleReady) {
+                        callGuestWithCanvasStream();
+                    }
+                }
+                break;
+
+            case 'MATCH_START':
+                if (myPlayerIndex === 2) {
+                    currentRoomCode = msg.roomCode || currentRoomCode;
+                    hostNickname = msg.hostName || 'Player 1';
+                    guestNickname = msg.guestName || getNickname();
+                    gameMode = 'online';
+                    showNotification(`⚔️ ${hostNickname} vs ${guestNickname}!`);
+                    startGame(hostNickname, guestNickname);
+                }
+                break;
+
+            case 'GUEST_READY':
+                if (myPlayerIndex === 1) {
+                    guestReadyReceived = true;
+                    if (hostRuffleReady) {
+                        callGuestWithCanvasStream();
+                    }
+                }
+                break;
+
+            case 'INPUT':
+                handleRemoteActions(msg.playerIndex, msg.actions);
+                break;
+
+            case 'CHAT':
+                appendChatLine(msg.nickname || `Player ${msg.playerIndex}`, msg.text, false, msg.playerIndex);
+                break;
+
+            case 'DC_PING':
+                sendP2P({ type: 'DC_PONG', clientTime: msg.clientTime });
+                break;
+
+            case 'DC_PONG': {
+                const rtt = Date.now() - (msg.clientTime || lastPingTime);
+                const pingEl = document.getElementById('pingDisplay');
+                pingEl.textContent = `P2P Ping: ${rtt}ms`;
+                pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
+                break;
+            }
+
+            case 'LEAVE_ROOM':
+                showNotification('⚠️ Opponent left the arena!');
+                appendChatLine('System', 'Opponent left the arena.', true);
+                releaseAllSyntheticP2Keys();
+                break;
+        }
+    });
+
+    conn.on('close', () => {
+        if (gameMode === 'online') {
+            showNotification('⚠️ Opponent P2P connection closed.');
+            appendChatLine('System', 'Opponent disconnected.', true);
+            releaseAllSyntheticP2Keys();
+        }
+    });
+}
+
+function attachGuestRemoteStream(remoteStream) {
+    const videoEl = document.getElementById('remoteVideo');
+    if (videoEl.srcObject !== remoteStream) {
+        videoEl.srcObject = remoteStream;
+    }
+    videoEl.style.display = 'block';
+    document.getElementById('fallbackStreamImg').style.display = 'none';
+    document.getElementById('gameOverlay').classList.add('hidden');
+    if (webrtcRetryTimer) {
+        clearInterval(webrtcRetryTimer);
+        webrtcRetryTimer = null;
+    }
+    webrtcConnected = true;
+    updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+    videoEl.play().catch(() => {
+        videoEl.muted = true;
+        videoEl.play().catch(() => {});
+        document.getElementById('btnUnmuteGuest').style.display = 'inline-block';
+    });
+}
+
+async function callGuestWithCanvasStream() {
+    if (myPlayerIndex !== 1 || !peer || !hostRuffleReady) return;
+    const targetPeerId = guestPeerId || (p2pDataConn && p2pDataConn.peer);
+    if (!targetPeerId) return;
+
+    const canvas = await waitForRuffleCanvas();
+    if (!canvas || !canvas.captureStream) return;
+
+    if (!canvasCaptureStream) {
+        canvasCaptureStream = canvas.captureStream(60);
+    }
+    if (window.__bvnAudioStreamDest && window.__bvnAudioStreamDest.stream) {
+        const existingAudio = canvasCaptureStream.getAudioTracks();
+        if (existingAudio.length === 0) {
+            const audioTracks = window.__bvnAudioStreamDest.stream.getAudioTracks();
+            audioTracks.forEach(t => canvasCaptureStream.addTrack(t));
+        }
+    }
+    canvasCaptureStream.getVideoTracks().forEach(track => {
+        if ('contentHint' in track) track.contentHint = 'motion';
+    });
+
+    if (p2pMediaCall) {
+        try { p2pMediaCall.close(); } catch (e) {}
+    }
+    p2pMediaCall = peer.call(targetPeerId, canvasCaptureStream);
+    updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
+}
+
 // ── Start Game Session ─────────────────────────────────
 async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
     document.getElementById('lobby').classList.add('hidden');
@@ -1279,34 +1485,35 @@ async function startGame(hostName = 'Player 1', guestName = 'Player 2') {
         if (myPlayerIndex === 1) {
             // HOST: Run authoritative Ruffle instance and stream canvas + audio over WebRTC to Guest
             hostRuffleReady = false;
+            canvasCaptureStream = null;
             overlayText.textContent = 'Starting Host Flash Engine (Ruffle)...';
             updateStreamBadge('webrtc', 'Loading Host Engine...');
             await loadHostRuffleGame();
             await waitForRuffleCanvas();
             hostRuffleReady = true;
             overlay.classList.add('hidden');
-            updateStreamBadge('webrtc', 'WebRTC Handshaking...');
-            // Immediately initiate WebRTC Offer once Host's Ruffle canvas is ready!
-            await initHostWebRTC();
+            updateStreamBadge('webrtc', 'WebRTC Streaming 60FPS...');
+            await callGuestWithCanvasStream();
         } else {
             // GUEST: Receive live WebRTC 60FPS video/audio stream from Host & send inputs over RTCDataChannel
-            overlayText.textContent = 'Connecting to Player 1 via WebRTC P2P...';
+            overlayText.textContent = 'Receiving Player 1 Live WebRTC 60FPS Stream...';
             if (rufflePlayer) {
                 rufflePlayer.remove();
                 rufflePlayer = null;
             }
             document.getElementById('fallbackStreamImg').style.display = 'none';
-            updateStreamBadge('webrtc', 'WebRTC Connecting P2P...');
-            sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+            updateStreamBadge('webrtc', 'WebRTC Connecting Stream...');
+            sendP2P({ type: 'GUEST_READY' });
             if (webrtcRetryTimer) clearInterval(webrtcRetryTimer);
             webrtcRetryTimer = setInterval(() => {
-                if (gameMode === 'online' && myPlayerIndex === 2 && !webrtcConnected) {
-                    sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+                const videoEl = document.getElementById('remoteVideo');
+                if (gameMode === 'online' && myPlayerIndex === 2 && (!videoEl.srcObject || videoEl.style.display === 'none')) {
+                    sendP2P({ type: 'GUEST_READY' });
                 } else {
                     clearInterval(webrtcRetryTimer);
                     webrtcRetryTimer = null;
                 }
-            }, 2500);
+            }, 2000);
         }
     } else {
         // LOCAL PLAY
@@ -1379,7 +1586,7 @@ function waitForRuffle() {
     });
 }
 
-// ── WebRTC Host-Canvas Video/Audio + DataChannel ───────
+// ── WebRTC Host-Canvas Video/Audio Helpers ─────────────
 function getRuffleCanvas() {
     if (!rufflePlayer || !rufflePlayer.shadowRoot) return null;
     return rufflePlayer.shadowRoot.querySelector('canvas');
@@ -1396,218 +1603,23 @@ async function waitForRuffleCanvas() {
     return getRuffleCanvas();
 }
 
-function enqueueWebRTCSignal(signal) {
-    signalQueue = signalQueue
-        .then(() => handleWebRTCSignal(signal))
-        .catch(() => {});
-}
-
-async function flushPendingIceCandidates() {
-    if (!peerConn || !peerConn.remoteDescription || !peerConn.remoteDescription.type) return;
-    while (pendingIceCandidates.length > 0) {
-        const cand = pendingIceCandidates.shift();
-        try {
-            await peerConn.addIceCandidate(new RTCIceCandidate(cand));
-        } catch (e) {}
-    }
-}
-
-async function initHostWebRTC() {
-    if (!hostRuffleReady) {
-        guestReadyReceived = true;
-        return;
-    }
-    cleanupWebRTC();
-    peerConn = new RTCPeerConnection(RTC_CONFIG);
-
-    // Create ultra-low-latency DataChannel for Guest inputs & Host HUD updates
-    dataChannel = peerConn.createDataChannel('bvn-inputs', {
-        ordered: false,
-        maxRetransmits: 0
-    });
-    setupDataChannel(dataChannel);
-
-    peerConn.onicecandidate = (e) => {
-        if (e.candidate) {
-            sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
-        }
-    };
-
-    peerConn.onconnectionstatechange = () => {
-        const st = peerConn?.connectionState;
-        if (st === 'connected') {
-            webrtcConnected = true;
-            updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
-        } else if (st === 'connecting') {
-            updateStreamBadge('webrtc', 'WebRTC Connecting...');
-        } else if (st === 'failed' || st === 'disconnected') {
-            webrtcConnected = false;
-            updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
-        }
-    };
-
-    const canvas = await waitForRuffleCanvas();
-    if (canvas && canvas.captureStream) {
-        canvasCaptureStream = canvas.captureStream(60);
-        // Attach Ruffle WebAudio stream track if available
-        if (window.__bvnAudioStreamDest && window.__bvnAudioStreamDest.stream) {
-            const audioTracks = window.__bvnAudioStreamDest.stream.getAudioTracks();
-            audioTracks.forEach(t => canvasCaptureStream.addTrack(t));
-        }
-        canvasCaptureStream.getTracks().forEach(track => {
-            if (track.kind === 'video' && 'contentHint' in track) {
-                track.contentHint = 'motion';
-            }
-            peerConn.addTrack(track, canvasCaptureStream);
-        });
-    }
-
-    const offer = await peerConn.createOffer();
-    await peerConn.setLocalDescription(offer);
-    sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'OFFER', sdp: peerConn.localDescription } });
-}
-
-async function handleWebRTCSignal(signal) {
-    if (!signal) return;
-
-    if (signal.type === 'GUEST_READY' && myPlayerIndex === 1) {
-        guestReadyReceived = true;
-        if (hostRuffleReady && !webrtcConnected) {
-            await initHostWebRTC();
-        }
-        return;
-    }
-
-    if (signal.type === 'OFFER' && myPlayerIndex === 2) {
-        cleanupWebRTC();
-        peerConn = new RTCPeerConnection(RTC_CONFIG);
-
-        peerConn.ondatachannel = (e) => {
-            dataChannel = e.channel;
-            setupDataChannel(dataChannel);
-        };
-
-        peerConn.ontrack = (e) => {
-            const videoEl = document.getElementById('remoteVideo');
-            if (e.streams && e.streams[0]) {
-                if (videoEl.srcObject !== e.streams[0]) {
-                    videoEl.srcObject = e.streams[0];
-                }
-            } else {
-                let s = videoEl.srcObject;
-                if (!s) {
-                    s = new MediaStream();
-                    videoEl.srcObject = s;
-                }
-                s.addTrack(e.track);
-            }
-            videoEl.style.display = 'block';
-            document.getElementById('fallbackStreamImg').style.display = 'none';
-            document.getElementById('gameOverlay').classList.add('hidden');
-            videoEl.play().catch(() => {
-                videoEl.muted = true;
-                videoEl.play().catch(() => {});
-                document.getElementById('btnUnmuteGuest').style.display = 'inline-block';
-            });
-        };
-
-        peerConn.onicecandidate = (e) => {
-            if (e.candidate) {
-                sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ICE', candidate: e.candidate } });
-            }
-        };
-
-        peerConn.onconnectionstatechange = () => {
-            const st = peerConn?.connectionState;
-            if (st === 'connected') {
-                webrtcConnected = true;
-                if (webrtcRetryTimer) {
-                    clearInterval(webrtcRetryTimer);
-                    webrtcRetryTimer = null;
-                }
-                updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
-            } else if (st === 'connecting') {
-                updateStreamBadge('webrtc', 'WebRTC Connecting...');
-            } else if (st === 'failed' || st === 'disconnected') {
-                webrtcConnected = false;
-                updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
-                sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
-            }
-        };
-
-        await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-        await flushPendingIceCandidates();
-        const answer = await peerConn.createAnswer();
-        await peerConn.setLocalDescription(answer);
-        sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'ANSWER', sdp: peerConn.localDescription } });
-        return;
-    }
-
-    if (signal.type === 'ANSWER' && myPlayerIndex === 1 && peerConn) {
-        await peerConn.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-        await flushPendingIceCandidates();
-        return;
-    }
-
-    if (signal.type === 'ICE' && signal.candidate) {
-        if (peerConn && peerConn.remoteDescription && peerConn.remoteDescription.type) {
-            try {
-                await peerConn.addIceCandidate(new RTCIceCandidate(signal.candidate));
-            } catch (e) {}
-        } else {
-            pendingIceCandidates.push(signal.candidate);
-        }
-    }
-}
-
-function setupDataChannel(dc) {
-    dc.onopen = () => {
-        webrtcConnected = true;
-        if (webrtcRetryTimer) {
-            clearInterval(webrtcRetryTimer);
-            webrtcRetryTimer = null;
-        }
-        updateStreamBadge('webrtc', 'WebRTC 60FPS + DataChannel');
-    };
-    dc.onmessage = (e) => {
-        try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'INPUT') {
-                handleRemoteActions(msg.playerIndex, msg.actions);
-            } else if (msg.type === 'DC_PING') {
-                dc.send(JSON.stringify({ type: 'DC_PONG', clientTime: msg.clientTime }));
-            } else if (msg.type === 'DC_PONG') {
-                const rtt = Date.now() - (msg.clientTime || lastPingTime);
-                const pingEl = document.getElementById('pingDisplay');
-                pingEl.textContent = `P2P Ping: ${rtt}ms`;
-                pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
-            }
-        } catch (err) {}
-    };
-}
-
 function cleanupWebRTC() {
     webrtcConnected = false;
-    pendingIceCandidates = [];
-    if (dataChannel) {
-        try { dataChannel.close(); } catch (e) {}
-        dataChannel = null;
-    }
-    if (peerConn) {
-        try { peerConn.close(); } catch (e) {}
-        peerConn = null;
+    if (p2pMediaCall) {
+        try { p2pMediaCall.close(); } catch (e) {}
+        p2pMediaCall = null;
     }
 }
 
 function reconnectWebRTC() {
     if (gameMode !== 'online') return;
-    cleanupWebRTC();
     updateStreamBadge('webrtc', 'WebRTC Reconnecting...');
-    showNotification('🔄 Reconnecting WebRTC P2P Stream + DataChannel...');
+    showNotification('🔄 Reconnecting WebRTC 60FPS Stream...');
     if (myPlayerIndex === 1) {
-        initHostWebRTC();
+        canvasCaptureStream = null;
+        callGuestWithCanvasStream();
     } else if (myPlayerIndex === 2) {
-        sendWS({ type: 'WEBRTC_SIGNAL', signal: { type: 'GUEST_READY' } });
+        sendP2P({ type: 'GUEST_READY' });
     }
 }
 
@@ -1687,19 +1699,12 @@ onWindowKeyUp.__bvnAppListener = true;
 window.addEventListener('keyup', onWindowKeyUp, true);
 
 function broadcastMyActions(stateObj) {
-    const payload = {
+    sendP2P({
         type: 'INPUT',
         playerIndex: myPlayerIndex,
         actions: stateObj,
         seq: ++inputSeq
-    };
-    if (dataChannel && dataChannel.readyState === 'open') {
-        try {
-            dataChannel.send(JSON.stringify(payload));
-            return;
-        } catch (e) {}
-    }
-    sendWS(payload);
+    });
 }
 
 // Minimum key hold time (65ms = ~2 frames at 30 FPS) so rapid taps are guaranteed to be observed
@@ -1809,7 +1814,14 @@ function sendChat() {
     const input = document.getElementById('chatInput');
     const text = input.value.trim();
     if (!text) return;
-    sendWS({ type: 'CHAT', text });
+    const myName = getNickname();
+    appendChatLine(myName, text, false, myPlayerIndex || 1);
+    sendP2P({
+        type: 'CHAT',
+        playerIndex: myPlayerIndex || 1,
+        nickname: myName,
+        text
+    });
     input.value = '';
     focusGame();
 }
@@ -1848,16 +1860,17 @@ function toggleFullscreen() {
 
 function leaveGame() {
     if (gameMode === 'online') {
-        sendWS({ type: 'LEAVE_ROOM' });
+        sendP2P({ type: 'LEAVE_ROOM' });
     }
     releaseAllSyntheticP2Keys();
-    cleanupWebRTC();
+    destroyPeerSession();
     if (webrtcRetryTimer) {
         clearInterval(webrtcRetryTimer);
         webrtcRetryTimer = null;
     }
     hostRuffleReady = false;
     guestReadyReceived = false;
+    canvasCaptureStream = null;
     if (rufflePlayer) {
         rufflePlayer.remove();
         rufflePlayer = null;
@@ -1875,6 +1888,7 @@ function leaveGame() {
     document.getElementById('chatMessages').innerHTML = '';
     currentRoomCode = null;
     myPlayerIndex = null;
+    updateConnection('connected', 'WebRTC Cloud Ready (P2P)');
     ACTIONS.forEach(a => { p1ActionState[a] = false; p2ActionState[a] = false; });
 }
 
@@ -1912,7 +1926,7 @@ function escapeHtml(str) {
 }
 
 // ── Start ──────────────────────────────────────────────
-connectWS();
+initOnlineEngine();
 </script>
 </body>
 </html>
