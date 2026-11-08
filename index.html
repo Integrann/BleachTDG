@@ -830,8 +830,14 @@
             <span>Role: <strong id="gamePlayerLabel">—</strong></span>
             <span class="stream-badge webrtc" id="streamModeBadge">WebRTC Initializing...</span>
         </div>
-        <div style="display:flex; align-items:center; gap:10px;">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <span class="ping" id="pingDisplay">Ping: —</span>
+            <select id="streamQualitySelect" onchange="changeStreamQuality(this.value)" title="Stream Bandwidth & Latency Preset"
+                    style="background:#171b30; color:#e2e8f0; border:1px solid #2b3252; border-radius:6px; padding:4px 8px; font-size:.75rem; font-weight:600; cursor:pointer;">
+                <option value="ultra" selected>⚡ Ultra Low-Ping (Fastest Wi-Fi)</option>
+                <option value="balanced">⚖️ Balanced (450p 30FPS)</option>
+                <option value="high">✨ High Quality (600p 60FPS)</option>
+            </select>
             <button class="btn-secondary" id="btnStreamMode" style="padding:5px 10px; font-size:.76rem; display:none;" onclick="reconnectWebRTC()">🔄 Reconnect WebRTC</button>
             <button class="btn-danger" onclick="leaveGame()">✕ Leave Arena</button>
         </div>
@@ -987,24 +993,99 @@ window.__bvnMuted = localStorage.getItem('bvn_muted') === 'true';
     };
 })();
 
-// 3. Hook Ruffle's WASM keyboard & focus listeners so:
+// 3. Hook Ruffle's WASM keyboard, focus, and requestAnimationFrame loop so:
 //    - Ruffle NEVER loses internal `has_focus` when Host switches windows/tabs or hasn't clicked the canvas
-//    - Ruffle NEVER pauses execution when Host tab is in the background
+//    - Ruffle NEVER pauses execution when Host switches to another browser tab/website (Web Worker 60Hz RAF driver!)
 //    - Synthetic Player 2 keys can invoke Ruffle's WASM keydown/keyup closures directly
 window.__bvnRuffleKeydownListeners = [];
 window.__bvnRuffleKeyupListeners = [];
 window.__bvnRuffleFocusInListeners = [];
+window.__bvnCanvasVideoTrack = null;
 (function hookRuffleEvents() {
+    const origHiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden') || Object.getOwnPropertyDescriptor(document, 'hidden');
+    function isTabActuallyHidden() {
+        try {
+            return origHiddenDesc && origHiddenDesc.get ? !!origHiddenDesc.get.call(document) : false;
+        } catch (e) {
+            return false;
+        }
+    }
+
     try {
         Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
         Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+        Object.defineProperty(document, 'webkitHidden', { get: () => false, configurable: true });
+        Document.prototype.hasFocus = function() { return true; };
     } catch (e) {}
+
+    // Wrap requestAnimationFrame with an un-throttlable Web Worker 60Hz clock so Ruffle continues running
+    // at full speed even when Player 1 switches to another website/tab or minimizes the browser!
+    const origRAF = window.requestAnimationFrame.bind(window);
+    const origCAF = window.cancelAnimationFrame.bind(window);
+    let nextRafId = 1;
+    const pendingRafs = new Map();
+
+    window.requestAnimationFrame = function(callback) {
+        const id = nextRafId++;
+        const createdAt = performance.now();
+        const nativeId = origRAF((ts) => {
+            if (!pendingRafs.has(id)) return;
+            pendingRafs.delete(id);
+            try { callback(ts); } catch (e) { setTimeout(() => { throw e; }, 0); }
+        });
+        pendingRafs.set(id, { callback, nativeId, createdAt });
+        return id;
+    };
+
+    window.cancelAnimationFrame = function(id) {
+        const entry = pendingRafs.get(id);
+        if (entry) {
+            pendingRafs.delete(id);
+            origCAF(entry.nativeId);
+        } else {
+            origCAF(id);
+        }
+    };
+
+    function flushBackgroundRafs() {
+        if (pendingRafs.size === 0) return;
+        const now = performance.now();
+        const hidden = isTabActuallyHidden();
+        // Run queued RAF callbacks immediately if tab is in background OR if native RAF stalled > 26ms
+        const toRun = [];
+        for (const [id, entry] of pendingRafs.entries()) {
+            if (hidden || (now - entry.createdAt >= 26)) {
+                pendingRafs.delete(id);
+                origCAF(entry.nativeId);
+                toRun.push(entry.callback);
+            }
+        }
+        if (toRun.length > 0) {
+            for (let i = 0; i < toRun.length; i++) {
+                try { toRun[i](now); } catch (e) {}
+            }
+            // Force WebRTC CanvasCaptureMediaStreamTrack to push the newly rendered frame even in a background tab
+            if (window.__bvnCanvasVideoTrack && typeof window.__bvnCanvasVideoTrack.requestFrame === 'function') {
+                try { window.__bvnCanvasVideoTrack.requestFrame(); } catch (e) {}
+            }
+        }
+    }
+
+    try {
+        const workerBlob = new Blob([
+            'setInterval(function(){ postMessage(1); }, 16);'
+        ], { type: 'application/javascript' });
+        const bgWorker = new Worker(URL.createObjectURL(workerBlob));
+        bgWorker.onmessage = flushBackgroundRafs;
+    } catch (e) {
+        setInterval(flushBackgroundRafs, 16);
+    }
 
     const origAddEventListener = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function(type, listener, options) {
         if (listener && !listener.__bvnAppListener) {
             // Prevent Ruffle from registering focusout/blur or visibilitychange pause handlers
-            if (type === 'focusout' || type === 'blur' || type === 'visibilitychange') {
+            if (type === 'focusout' || type === 'blur' || type === 'visibilitychange' || type === 'webkitvisibilitychange' || type === 'pagehide') {
                 return;
             }
             const fn = typeof listener === 'function' ? listener : (listener && typeof listener.handleEvent === 'function' ? listener.handleEvent.bind(listener) : null);
@@ -1053,7 +1134,10 @@ const CLOUD_BROKERS = [
     'wss://broker.hivemq.com:8884/mqtt'
 ];
 let brokerIdx = 0;
-let mqttClient = null;
+let mqttClient = null;       // Strictly for instant <60B Control / Input / Ping packets (Zero video congestion!)
+let mqttStreamClient = null; // Separate WebSocket connection strictly for fallback video frames
+let streamQualityPreset = 'ultra'; // 'ultra' | 'balanced' | 'high'
+let videoRtpSender = null;
 const TOPIC_PREFIX = 'bvn26_pvp_v3';
 const CLIENT_ID = 'bvn_' + Math.random().toString(36).slice(2, 10);
 
@@ -1179,21 +1263,57 @@ function getPlayerInboxTopic(roomCode, targetPlayerIndex) {
     return `${TOPIC_PREFIX}/room/${roomCode}/p${targetPlayerIndex}`;
 }
 
+function getPlayerStreamTopic(roomCode, targetPlayerIndex) {
+    return `${TOPIC_PREFIX}/stream/${roomCode}/p${targetPlayerIndex}`;
+}
+
 function connectCloudBroker() {
     if (mqttClient) {
         try { mqttClient.end(true); } catch (e) {}
         mqttClient = null;
     }
+    if (mqttStreamClient) {
+        try { mqttStreamClient.end(true); } catch (e) {}
+        mqttStreamClient = null;
+    }
 
     const brokerUrl = CLOUD_BROKERS[brokerIdx % CLOUD_BROKERS.length];
     updateConnection('connecting', 'Connecting to Global Arena Network...');
 
+    // 1. Dedicated Control/Input/Ping WebSocket (NEVER carries video frames -> zero TCP head-of-line queuing!)
     mqttClient = window.mqtt.connect(brokerUrl, {
-        clientId: CLIENT_ID + '_' + Math.floor(Math.random() * 10000),
+        clientId: CLIENT_ID + '_ctrl_' + Math.floor(Math.random() * 10000),
         clean: true,
         connectTimeout: 6000,
         reconnectPeriod: 2000,
         keepalive: 25
+    });
+
+    // 2. Separate Stream WebSocket strictly for fallback video frames
+    mqttStreamClient = window.mqtt.connect(brokerUrl, {
+        clientId: CLIENT_ID + '_strm_' + Math.floor(Math.random() * 10000),
+        clean: true,
+        connectTimeout: 6000,
+        reconnectPeriod: 2000,
+        keepalive: 25
+    });
+
+    mqttStreamClient.on('connect', () => {
+        if (currentRoomCode && myPlayerIndex === 2) {
+            mqttStreamClient.subscribe(getPlayerStreamTopic(currentRoomCode, 2), { qos: 0 });
+        }
+    });
+
+    mqttStreamClient.on('message', (topic, payloadBuf) => {
+        if (!currentRoomCode || myPlayerIndex !== 2) return;
+        if (topic === getPlayerStreamTopic(currentRoomCode, 2)) {
+            try {
+                const msg = JSON.parse(payloadBuf.toString());
+                if (msg && msg.type === 'CANVAS_FRAME') {
+                    handleRoomMessage(msg);
+                }
+            } catch (e) {}
+        }
     });
 
     mqttClient.on('connect', () => {
@@ -1257,9 +1377,23 @@ function publishCloud(topic, data) {
     }
 }
 
+function publishStreamFrame(roomCode, targetPlayerIndex, data) {
+    if (!mqttStreamClient || !mqttStreamClient.connected) return false;
+    try {
+        mqttStreamClient.publish(getPlayerStreamTopic(roomCode, targetPlayerIndex), JSON.stringify({ ...data, senderId: CLIENT_ID }), { qos: 0 });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function sendToOpponent(data) {
     if (!currentRoomCode || !myPlayerIndex) return false;
     const targetPlayer = myPlayerIndex === 1 ? 2 : 1;
+    // Route fallback video frames over the separate mqttStreamClient so control/input/ping socket stays 100% uncongested!
+    if (data.type === 'CANVAS_FRAME') {
+        return publishStreamFrame(currentRoomCode, targetPlayer, data);
+    }
     // Use WebRTC DataChannel first for inputs/ping when open
     if (dataChannel && dataChannel.readyState === 'open' && (data.type === 'INPUT' || data.type === 'DC_PING' || data.type === 'DC_PONG')) {
         try {
@@ -1414,6 +1548,9 @@ function joinRoom(customCode) {
     if (currentRoomCode && myPlayerIndex && mqttClient) {
         try { mqttClient.unsubscribe(getPlayerInboxTopic(currentRoomCode, myPlayerIndex)); } catch (e) {}
     }
+    if (currentRoomCode && mqttStreamClient) {
+        try { mqttStreamClient.unsubscribe(getPlayerStreamTopic(currentRoomCode, 2)); } catch (e) {}
+    }
 
     currentRoomCode = code;
     myPlayerIndex = 2;
@@ -1422,6 +1559,10 @@ function joinRoom(customCode) {
 
     showStatus('waiting', `Joining Room ${code}...`);
     updateConnection('connecting', `Joining Room ${code}...`);
+
+    if (mqttStreamClient) {
+        try { mqttStreamClient.subscribe(getPlayerStreamTopic(code, 2), { qos: 0 }); } catch (e) {}
+    }
 
     if (mqttClient) {
         mqttClient.subscribe(getPlayerInboxTopic(code, 2), { qos: 0 }, () => {
@@ -1590,6 +1731,15 @@ function handleRoomMessage(msg) {
 
         case 'FRAME_ACK':
             window.__bvnFallbackAcked = true;
+            break;
+
+        case 'SET_STREAM_QUALITY':
+            if (msg.preset) {
+                streamQualityPreset = msg.preset;
+                const sel = document.getElementById('streamQualitySelect');
+                if (sel) sel.value = msg.preset;
+                applyVideoSenderQuality();
+            }
             break;
 
         case 'CHAT':
@@ -1812,7 +1962,8 @@ async function initHostWebRTC() {
 
     const canvas = await waitForRuffleCanvas();
     if (canvas && canvas.captureStream) {
-        canvasCaptureStream = canvas.captureStream(60);
+        // BvN 2.6 natively runs at 30 FPS (600x450). Capturing at 30 FPS cuts CPU encode time & Wi-Fi airtime in half!
+        canvasCaptureStream = canvas.captureStream(30);
         if (window.__bvnAudioStreamDest && window.__bvnAudioStreamDest.stream) {
             const audioTracks = window.__bvnAudioStreamDest.stream.getAudioTracks();
             audioTracks.forEach(t => canvasCaptureStream.addTrack(t));
@@ -1822,18 +1973,10 @@ async function initHostWebRTC() {
                 track.contentHint = 'motion';
             }
             const sender = peerConn.addTrack(track, canvasCaptureStream);
-            if (track.kind === 'video' && sender && sender.getParameters && sender.setParameters) {
-                try {
-                    const params = sender.getParameters() || {};
-                    params.degradationPreference = 'maintain-framerate';
-                    if (params.encodings && params.encodings.length > 0) {
-                        params.encodings[0].maxBitrate = 900000; // 900 kbps prevents Wi-Fi router bufferbloat
-                        params.encodings[0].maxFramerate = 60;
-                        params.encodings[0].priority = 'high';
-                        params.encodings[0].networkPriority = 'high';
-                    }
-                    sender.setParameters(params).catch(() => {});
-                } catch (e) {}
+            if (track.kind === 'video') {
+                window.__bvnCanvasVideoTrack = track;
+                videoRtpSender = sender;
+                applyVideoSenderQuality();
             }
         });
     }
@@ -1841,6 +1984,41 @@ async function initHostWebRTC() {
     const offer = await peerConn.createOffer();
     await peerConn.setLocalDescription(offer);
     sendToOpponent({ type: 'WEBRTC_SIGNAL', signal: { type: 'OFFER', sdp: peerConn.localDescription } });
+}
+
+function changeStreamQuality(preset) {
+    streamQualityPreset = preset || 'ultra';
+    applyVideoSenderQuality();
+    if (gameMode === 'online' && myPlayerIndex === 2) {
+        sendToOpponent({ type: 'SET_STREAM_QUALITY', preset: streamQualityPreset });
+    }
+    focusGame();
+}
+
+function applyVideoSenderQuality() {
+    if (!videoRtpSender || !videoRtpSender.getParameters || !videoRtpSender.setParameters) return;
+    try {
+        const params = videoRtpSender.getParameters() || {};
+        params.degradationPreference = 'maintain-framerate';
+        if (params.encodings && params.encodings.length > 0) {
+            if (streamQualityPreset === 'ultra') {
+                params.encodings[0].maxBitrate = 380000; // 380 kbps — ultra-light on Wi-Fi!
+                params.encodings[0].maxFramerate = 30;
+                params.encodings[0].scaleResolutionDownBy = 1.6;
+            } else if (streamQualityPreset === 'balanced') {
+                params.encodings[0].maxBitrate = 680000; // 680 kbps
+                params.encodings[0].maxFramerate = 30;
+                params.encodings[0].scaleResolutionDownBy = 1.25;
+            } else {
+                params.encodings[0].maxBitrate = 1100000; // 1.1 Mbps
+                params.encodings[0].maxFramerate = 60;
+                params.encodings[0].scaleResolutionDownBy = 1.0;
+            }
+            params.encodings[0].priority = 'high';
+            params.encodings[0].networkPriority = 'high';
+        }
+        videoRtpSender.setParameters(params).catch(() => {});
+    } catch (e) {}
 }
 
 async function handleWebRTCSignal(signal) {
