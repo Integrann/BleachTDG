@@ -1166,6 +1166,8 @@ let cloudRelayHintShown = false;
 // WebRTC State
 let peerConn = null;
 let dataChannel = null;
+let frameDataChannel = null;
+let unreliableSyncTimer = null;
 let webrtcConnected = false;
 let hostRuffleReady = false;
 let guestReadyReceived = false;
@@ -1177,6 +1179,22 @@ let fallbackInterval = null;
 let rtcSessionSeq = 0;
 let currentRtcId = null;
 let rtcAttemptStartedAt = 0;
+
+// Unreliable UDP-like SCTP DataChannel Config (zero retransmissions, unordered delivery)
+const UNRELIABLE_DC_INPUT_OPTS = {
+    ordered: false,
+    maxRetransmits: 0,
+    negotiated: true,
+    id: 0,
+    priority: 'high'
+};
+
+const UNRELIABLE_DC_FRAME_OPTS = {
+    ordered: false,
+    maxRetransmits: 0,
+    negotiated: true,
+    id: 1
+};
 
 const RTC_CONFIG = {
     iceCandidatePoolSize: 4,
@@ -1512,12 +1530,32 @@ function publishStreamFrame(roomCode, targetPlayerIndex, data) {
 
 function sendToOpponent(data) {
     if (!currentRoomCode || !myPlayerIndex) return false;
-    // Use WebRTC DataChannel first for fast UDP game traffic when open
-    if (dataChannel && dataChannel.readyState === 'open' && (data.type === 'INPUT' || data.type === 'DC_PING' || data.type === 'DC_PONG' || data.type === 'SET_STREAM_QUALITY')) {
-        try {
-            dataChannel.send(JSON.stringify(data));
-            return true;
-        } catch (e) {}
+    // Use Unreliable WebRTC DataChannel first for UDP game traffic when open
+    if (dataChannel && dataChannel.readyState === 'open') {
+        if (data.type === 'DC_PING' || data.type === 'DC_PONG') {
+            return sendUnreliablePing(data.type === 'DC_PONG', data.clientTime || Date.now());
+        }
+        if (data.type === 'INPUT') {
+            return sendUnreliableInput(data.playerIndex || myPlayerIndex, data.seq || inputSeq, data.actions || {});
+        }
+        if (data.type === 'SET_STREAM_QUALITY' || data.type === 'FRAME_ACK') {
+            if (dataChannel.bufferedAmount <= 16384) {
+                try {
+                    dataChannel.send(JSON.stringify(data));
+                    return true;
+                } catch (e) {}
+            }
+        }
+    }
+    if (data.type === 'CANVAS_FRAME' && frameDataChannel && frameDataChannel.readyState === 'open') {
+        // Drop frame immediately if SCTP buffer is non-empty so old frames never queue up!
+        if (frameDataChannel.bufferedAmount === 0) {
+            try {
+                frameDataChannel.send(data.frameData);
+                return true;
+            } catch (e) {}
+        }
+        return false;
     }
     if (transportMode === 'direct-ws') {
         if (directWs && directWs.readyState === WebSocket.OPEN) {
@@ -1542,10 +1580,7 @@ function startPing() {
         if (gameMode !== 'online' || !currentRoomCode) return;
         lastPingTime = Date.now();
         if (dataChannel && dataChannel.readyState === 'open') {
-            try {
-                dataChannel.send(JSON.stringify({ type: 'DC_PING', clientTime: lastPingTime }));
-                return;
-            } catch (e) {}
+            if (sendUnreliablePing(false, lastPingTime)) return;
         }
         sendToOpponent({ type: 'PING', clientTime: lastPingTime });
     }, 2000);
@@ -2181,7 +2216,7 @@ function syncWebRTCState() {
                 document.getElementById('gameOverlay').classList.add('hidden');
             }
         }
-        updateStreamBadge('webrtc', dcOpen ? '⚡ WebRTC P2P Direct (Low Ping)' : '⚡ WebRTC P2P Stream');
+        updateStreamBadge('webrtc', dcOpen ? '⚡ WebRTC UDP Unreliable (0-Retransmit)' : '⚡ WebRTC P2P Stream');
     } else if (iceState === 'failed' || connState === 'failed') {
         if (transportMode === 'direct-ws') {
             updateStreamBadge('webrtc', '🟢 Radmin / LAN Direct Server');
@@ -2216,12 +2251,23 @@ async function initHostWebRTC() {
     rtcAttemptStartedAt = Date.now();
     peerConn = new RTCPeerConnection(RTC_CONFIG);
 
-    // Create UDP-style unordered, zero-retransmit DataChannel so Wi-Fi packet loss NEVER stalls subsequent inputs or pings!
-    dataChannel = peerConn.createDataChannel('bvn-inputs', {
-        ordered: false,
-        maxRetransmits: 0
-    });
+    // Create pre-negotiated Unreliable UDP DataChannels (ordered: false, maxRetransmits: 0)
+    // so packet loss NEVER triggers SCTP retransmissions or head-of-line blocking!
+    dataChannel = peerConn.createDataChannel('bvn-inputs', UNRELIABLE_DC_INPUT_OPTS);
     setupDataChannel(dataChannel);
+    frameDataChannel = peerConn.createDataChannel('bvn-frames', UNRELIABLE_DC_FRAME_OPTS);
+    setupFrameDataChannel(frameDataChannel);
+
+    peerConn.ondatachannel = (e) => {
+        if (!e.channel) return;
+        if (e.channel.label === 'bvn-frames') {
+            frameDataChannel = e.channel;
+            setupFrameDataChannel(frameDataChannel);
+        } else {
+            dataChannel = e.channel;
+            setupDataChannel(dataChannel);
+        }
+    };
 
     peerConn.onicecandidate = (e) => {
         if (e.candidate && currentRtcId === myRtcId) {
@@ -2312,9 +2358,22 @@ async function handleWebRTCSignal(signal) {
         rtcAttemptStartedAt = Date.now();
         peerConn = new RTCPeerConnection(RTC_CONFIG);
 
+        // Bind pre-negotiated Unreliable UDP DataChannels (ordered: false, maxRetransmits: 0)
+        // on Guest immediately without waiting for in-band DCEP handshake!
+        dataChannel = peerConn.createDataChannel('bvn-inputs', UNRELIABLE_DC_INPUT_OPTS);
+        setupDataChannel(dataChannel);
+        frameDataChannel = peerConn.createDataChannel('bvn-frames', UNRELIABLE_DC_FRAME_OPTS);
+        setupFrameDataChannel(frameDataChannel);
+
         peerConn.ondatachannel = (e) => {
-            dataChannel = e.channel;
-            setupDataChannel(dataChannel);
+            if (!e.channel) return;
+            if (e.channel.label === 'bvn-frames') {
+                frameDataChannel = e.channel;
+                setupFrameDataChannel(frameDataChannel);
+            } else {
+                dataChannel = e.channel;
+                setupDataChannel(dataChannel);
+            }
         };
 
         peerConn.ontrack = (e) => {
@@ -2382,31 +2441,166 @@ async function handleWebRTCSignal(signal) {
     }
 }
 
-let lastRemoteInputSeq = 0;
+// ── Binary 6-Byte Unreliable UDP DataChannel Protocol ──
+// Packet 0x01 (INPUT, 6 bytes): [0x01, playerIndex, seqLo, seqHi, maskLo, maskHi]
+// Packet 0x02 (DC_PING, 5 bytes): [0x02, t0, t1, t2, t3]
+// Packet 0x03 (DC_PONG, 5 bytes): [0x03, t0, t1, t2, t3]
+function encodeInputPacket(playerIndex, seq, stateObj) {
+    let mask = 0;
+    for (let i = 0; i < ACTIONS.length; i++) {
+        if (stateObj[ACTIONS[i]]) mask |= (1 << i);
+    }
+    const buf = new ArrayBuffer(6);
+    const view = new DataView(buf);
+    view.setUint8(0, 0x01);
+    view.setUint8(1, playerIndex & 0xFF);
+    view.setUint16(2, seq & 0xFFFF, true);
+    view.setUint16(4, mask & 0xFFFF, true);
+    return buf;
+}
+
+function decodeInputPacket(view) {
+    const playerIndex = view.getUint8(1);
+    const seq = view.getUint16(2, true);
+    const mask = view.getUint16(4, true);
+    const actions = {};
+    for (let i = 0; i < ACTIONS.length; i++) {
+        actions[ACTIONS[i]] = !!(mask & (1 << i));
+    }
+    return { playerIndex, seq, actions };
+}
+
+function isNewerSeq16(seq, lastSeq) {
+    if (lastSeq < 0) return true;
+    const diff = (seq - lastSeq) & 0xFFFF;
+    return diff === 0 || diff < 32768;
+}
+
+function sendUnreliableInput(playerIndex, seq, stateObj) {
+    if (!dataChannel || dataChannel.readyState !== 'open') return false;
+    // Drop immediately if SCTP send buffer has queued data so stale inputs never build latency
+    if (dataChannel.bufferedAmount > 8192) return false;
+    try {
+        dataChannel.send(encodeInputPacket(playerIndex, seq, stateObj));
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function sendUnreliablePing(isPong, timestampMs) {
+    if (!dataChannel || dataChannel.readyState !== 'open') return false;
+    if (dataChannel.bufferedAmount > 8192) return false;
+    try {
+        const buf = new ArrayBuffer(5);
+        const view = new DataView(buf);
+        view.setUint8(0, isPong ? 0x03 : 0x02);
+        view.setUint32(1, (timestampMs >>> 0), true);
+        dataChannel.send(buf);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+let lastRemoteInputSeq = -1;
 function setupDataChannel(dc) {
-    lastRemoteInputSeq = 0;
+    lastRemoteInputSeq = -1;
+    try { dc.binaryType = 'arraybuffer'; } catch (e) {}
+
     dc.onopen = () => {
         syncWebRTCState();
         lastPingTime = Date.now();
-        try { dc.send(JSON.stringify({ type: 'DC_PING', clientTime: lastPingTime })); } catch (e) {}
+        sendUnreliablePing(false, lastPingTime);
+
+        // 30Hz (33ms) Unreliable UDP state-healing pulse:
+        // Since maxRetransmits=0 drops lost UDP packets rather than stalling,
+        // pulsing the 6-byte action bitmask at 30Hz guarantees any lost keyup/keydown
+        // is corrected on the very next frame with zero head-of-line blocking!
+        if (unreliableSyncTimer) clearInterval(unreliableSyncTimer);
+        unreliableSyncTimer = setInterval(() => {
+            if (!dataChannel || dataChannel.readyState !== 'open' || gameMode !== 'online') return;
+            if (dataChannel.bufferedAmount > 0) return;
+            const myState = myPlayerIndex === 1 ? p1ActionState : p2ActionState;
+            sendUnreliableInput(myPlayerIndex, inputSeq, myState);
+        }, 33);
     };
-    dc.onclose = syncWebRTCState;
+
+    dc.onclose = () => {
+        if (unreliableSyncTimer) {
+            clearInterval(unreliableSyncTimer);
+            unreliableSyncTimer = null;
+        }
+        syncWebRTCState();
+    };
+
     dc.onmessage = (e) => {
         try {
+            if (e.data instanceof ArrayBuffer) {
+                const view = new DataView(e.data);
+                if (view.byteLength < 1) return;
+                const pktType = view.getUint8(0);
+                if (pktType === 0x01 && view.byteLength >= 6) {
+                    const { playerIndex, seq, actions } = decodeInputPacket(view);
+                    if (!isNewerSeq16(seq, lastRemoteInputSeq)) return;
+                    lastRemoteInputSeq = seq;
+                    handleRemoteActions(playerIndex, actions);
+                } else if (pktType === 0x02 && view.byteLength >= 5) {
+                    const clientTime32 = view.getUint32(1, true);
+                    sendUnreliablePing(true, clientTime32);
+                } else if (pktType === 0x03 && view.byteLength >= 5) {
+                    const sent32 = view.getUint32(1, true);
+                    const now32 = (Date.now() >>> 0);
+                    const rtt = Math.max(0, (now32 - sent32) >>> 0);
+                    if (rtt < 10000) {
+                        const pingEl = document.getElementById('pingDisplay');
+                        pingEl.textContent = `UDP Ping: ${rtt}ms`;
+                        pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
+                    }
+                }
+                return;
+            }
+
             const msg = JSON.parse(e.data);
             if (msg.type === 'INPUT') {
-                if (msg.seq && msg.seq < lastRemoteInputSeq) return;
-                if (msg.seq) lastRemoteInputSeq = msg.seq;
+                if (msg.seq && !isNewerSeq16(msg.seq & 0xFFFF, lastRemoteInputSeq)) return;
+                if (msg.seq) lastRemoteInputSeq = msg.seq & 0xFFFF;
                 handleRemoteActions(msg.playerIndex, msg.actions);
             } else if (msg.type === 'DC_PING') {
-                dc.send(JSON.stringify({ type: 'DC_PONG', clientTime: msg.clientTime }));
+                sendUnreliablePing(true, msg.clientTime || Date.now());
             } else if (msg.type === 'DC_PONG') {
                 const rtt = Date.now() - (msg.clientTime || lastPingTime);
                 const pingEl = document.getElementById('pingDisplay');
-                pingEl.textContent = `P2P Ping: ${rtt}ms`;
+                pingEl.textContent = `UDP Ping: ${rtt}ms`;
                 pingEl.className = 'ping ' + (rtt < 60 ? 'good' : rtt < 130 ? 'medium' : 'bad');
+            } else if (msg.type === 'SET_STREAM_QUALITY' && msg.preset) {
+                streamQualityPreset = msg.preset;
+                const sel = document.getElementById('streamQualitySelect');
+                if (sel) sel.value = msg.preset;
+                applyVideoSenderQuality();
+            } else if (msg.type === 'FRAME_ACK') {
+                window.__bvnFallbackAcked = true;
             }
         } catch (err) {}
+    };
+}
+
+function setupFrameDataChannel(fdc) {
+    fdc.onopen = syncWebRTCState;
+    fdc.onclose = syncWebRTCState;
+    fdc.onmessage = (e) => {
+        if (myPlayerIndex === 2 && typeof e.data === 'string' && e.data.startsWith('data:image')) {
+            const videoEl = document.getElementById('remoteVideo');
+            if (!videoEl || !videoEl.srcObject || videoEl.paused) {
+                const img = document.getElementById('fallbackStreamImg');
+                if (img.style.display !== 'block') {
+                    img.style.display = 'block';
+                    document.getElementById('gameOverlay').classList.add('hidden');
+                }
+                img.src = e.data;
+            }
+            sendToOpponent({ type: 'FRAME_ACK' });
+        }
     };
 }
 
@@ -2467,9 +2661,17 @@ function cleanupWebRTC() {
     currentRtcId = null;
     videoRtpSender = null;
     pendingIceCandidates = [];
+    if (unreliableSyncTimer) {
+        clearInterval(unreliableSyncTimer);
+        unreliableSyncTimer = null;
+    }
     if (dataChannel) {
         try { dataChannel.close(); } catch (e) {}
         dataChannel = null;
+    }
+    if (frameDataChannel) {
+        try { frameDataChannel.close(); } catch (e) {}
+        frameDataChannel = null;
     }
     if (peerConn) {
         try { peerConn.close(); } catch (e) {}
@@ -2643,27 +2845,27 @@ onWindowKeyUp.__bvnAppListener = true;
 window.addEventListener('keyup', onWindowKeyUp, true);
 
 function broadcastMyActions(stateObj) {
-    const payload = {
-        type: 'INPUT',
-        playerIndex: myPlayerIndex,
-        actions: { ...stateObj },
-        seq: ++inputSeq
-    };
+    const seq = ++inputSeq;
+    const actionsSnapshot = { ...stateObj };
     if (dataChannel && dataChannel.readyState === 'open') {
-        const raw = JSON.stringify(payload);
-        try {
-            dataChannel.send(raw);
-            // Fast 14ms UDP redundant send so single Wi-Fi packet loss never drops an input without TCP head-of-line blocking
-            setTimeout(() => {
-                if (dataChannel && dataChannel.readyState === 'open' && payload.seq === inputSeq) {
-                    try { dataChannel.send(raw); } catch (e) {}
-                }
-            }, 14);
-            return;
-        } catch (e) {}
+        // Send 6-byte binary datagram immediately over Unreliable UDP DataChannel (ordered: false, maxRetransmits: 0)
+        // plus two rapid micro-bursts (+8ms and +20ms) so packet loss never drops a combo input or stalls subsequent inputs!
+        sendUnreliableInput(myPlayerIndex, seq, actionsSnapshot);
+        setTimeout(() => {
+            if (seq === inputSeq) sendUnreliableInput(myPlayerIndex, seq, actionsSnapshot);
+        }, 8);
+        setTimeout(() => {
+            if (seq === inputSeq) sendUnreliableInput(myPlayerIndex, seq, actionsSnapshot);
+        }, 20);
+        return;
     }
     // Fallback to direct server WebSocket (Radmin/LAN) or cloud broker when WebRTC DataChannel is not yet open
-    sendToOpponent(payload);
+    sendToOpponent({
+        type: 'INPUT',
+        playerIndex: myPlayerIndex,
+        actions: actionsSnapshot,
+        seq
+    });
 }
 
 // Minimum key hold time (65ms = ~2 frames at 30 FPS) so rapid taps are guaranteed to be observed
