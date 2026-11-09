@@ -1051,10 +1051,11 @@ window.__bvnCanvasVideoTrack = null;
         if (pendingRafs.size === 0) return;
         const now = performance.now();
         const hidden = isTabActuallyHidden();
-        // Run queued RAF callbacks immediately if tab is in background OR if native RAF stalled > 26ms
+        // Only drive RAF from background worker when tab is actually hidden or native RAF is fully suspended (> 180ms).
+        // Never fire early during active foreground play, or Ruffle will run double onEnterFrame ticks and corrupt combo/dash timing!
         const toRun = [];
         for (const [id, entry] of pendingRafs.entries()) {
-            if (hidden || (now - entry.createdAt >= 26)) {
+            if (hidden || (now - entry.createdAt >= 180)) {
                 pendingRafs.delete(id);
                 origCAF(entry.nativeId);
                 toRun.push(entry.callback);
@@ -1236,6 +1237,20 @@ const CODE_TO_GUEST_ACTION = {
     'Numpad4': 'FAR',    'Digit4': 'FAR',
     'Numpad5': 'SPECIAL','Digit5': 'SPECIAL',
     'Numpad6': 'ASSIST', 'Digit6': 'ASSIST'
+};
+
+// On Host's Ruffle instance, Player 1 is controlled by WASD + JKLUIO
+const ACTION_TO_P1_SYNTHETIC_KEY = {
+    'UP':      { code: 'KeyW', key: 'w', keyCode: 87, location: 0 },
+    'DOWN':    { code: 'KeyS', key: 's', keyCode: 83, location: 0 },
+    'LEFT':    { code: 'KeyA', key: 'a', keyCode: 65, location: 0 },
+    'RIGHT':   { code: 'KeyD', key: 'd', keyCode: 68, location: 0 },
+    'ATTACK':  { code: 'KeyJ', key: 'j', keyCode: 74, location: 0 },
+    'JUMP':    { code: 'KeyK', key: 'k', keyCode: 75, location: 0 },
+    'DASH':    { code: 'KeyL', key: 'l', keyCode: 76, location: 0 },
+    'FAR':     { code: 'KeyU', key: 'u', keyCode: 85, location: 0 },
+    'SPECIAL': { code: 'KeyI', key: 'i', keyCode: 73, location: 0 },
+    'ASSIST':  { code: 'KeyO', key: 'o', keyCode: 79, location: 0 }
 };
 
 // On Host's Ruffle instance, Player 2 is controlled by Arrow Keys + Numpad 1..6
@@ -2441,21 +2456,49 @@ async function handleWebRTCSignal(signal) {
     }
 }
 
-// ── Binary 6-Byte Unreliable UDP DataChannel Protocol ──
-// Packet 0x01 (INPUT, 6 bytes): [0x01, playerIndex, seqLo, seqHi, maskLo, maskHi]
+// ── Binary 10-Byte Unreliable UDP DataChannel Protocol (With 3-Step Transition History) ──
+// Packet 0x04 (INPUT_HISTORY, 10 bytes): [0x04, playerIndex, seqLo, seqHi, maskPrev2Lo, maskPrev2Hi, maskPrev1Lo, maskPrev1Hi, maskCurrLo, maskCurrHi]
+// Carrying the last 3 transitions in every 10-byte packet guarantees that even over unordered UDP (ordered: false, maxRetransmits: 0),
+// a rapid tap (<15ms keydown + keyup) is NEVER lost or reversed if two UDP packets arrive out of order!
 // Packet 0x02 (DC_PING, 5 bytes): [0x02, t0, t1, t2, t3]
 // Packet 0x03 (DC_PONG, 5 bytes): [0x03, t0, t1, t2, t3]
-function encodeInputPacket(playerIndex, seq, stateObj) {
+let localMaskHistory = [0, 0, 0];
+
+function actionsToBitmask(stateObj) {
     let mask = 0;
     for (let i = 0; i < ACTIONS.length; i++) {
         if (stateObj[ACTIONS[i]]) mask |= (1 << i);
     }
-    const buf = new ArrayBuffer(6);
+    return mask & 0xFFFF;
+}
+
+function bitmaskToActions(mask) {
+    const actions = {};
+    for (let i = 0; i < ACTIONS.length; i++) {
+        actions[ACTIONS[i]] = !!(mask & (1 << i));
+    }
+    return actions;
+}
+
+function recordLocalMaskTransition(stateObj) {
+    const mask = actionsToBitmask(stateObj);
+    localMaskHistory[0] = localMaskHistory[1];
+    localMaskHistory[1] = localMaskHistory[2];
+    localMaskHistory[2] = mask;
+    return mask;
+}
+
+function encodeInputPacket(playerIndex, seq, stateObj) {
+    const currMask = actionsToBitmask(stateObj);
+    localMaskHistory[2] = currMask;
+    const buf = new ArrayBuffer(10);
     const view = new DataView(buf);
-    view.setUint8(0, 0x01);
+    view.setUint8(0, 0x04);
     view.setUint8(1, playerIndex & 0xFF);
     view.setUint16(2, seq & 0xFFFF, true);
-    view.setUint16(4, mask & 0xFFFF, true);
+    view.setUint16(4, localMaskHistory[0], true);
+    view.setUint16(6, localMaskHistory[1], true);
+    view.setUint16(8, currMask, true);
     return buf;
 }
 
@@ -2463,17 +2506,18 @@ function decodeInputPacket(view) {
     const playerIndex = view.getUint8(1);
     const seq = view.getUint16(2, true);
     const mask = view.getUint16(4, true);
-    const actions = {};
-    for (let i = 0; i < ACTIONS.length; i++) {
-        actions[ACTIONS[i]] = !!(mask & (1 << i));
-    }
-    return { playerIndex, seq, actions };
+    return { playerIndex, seq, actions: bitmaskToActions(mask) };
 }
 
 function isNewerSeq16(seq, lastSeq) {
     if (lastSeq < 0) return true;
     const diff = (seq - lastSeq) & 0xFFFF;
     return diff === 0 || diff < 32768;
+}
+
+function seqDiff16(seq, lastSeq) {
+    if (lastSeq < 0) return 1;
+    return (seq - lastSeq) & 0xFFFF;
 }
 
 function sendUnreliableInput(playerIndex, seq, stateObj) {
@@ -2515,7 +2559,7 @@ function setupDataChannel(dc) {
 
         // 30Hz (33ms) Unreliable UDP state-healing pulse:
         // Since maxRetransmits=0 drops lost UDP packets rather than stalling,
-        // pulsing the 6-byte action bitmask at 30Hz guarantees any lost keyup/keydown
+        // pulsing the 10-byte transition history at 30Hz guarantees any lost keyup/keydown
         // is corrected on the very next frame with zero head-of-line blocking!
         if (unreliableSyncTimer) clearInterval(unreliableSyncTimer);
         unreliableSyncTimer = setInterval(() => {
@@ -2540,7 +2584,24 @@ function setupDataChannel(dc) {
                 const view = new DataView(e.data);
                 if (view.byteLength < 1) return;
                 const pktType = view.getUint8(0);
-                if (pktType === 0x01 && view.byteLength >= 6) {
+                if (pktType === 0x04 && view.byteLength >= 10) {
+                    const playerIndex = view.getUint8(1);
+                    const seq = view.getUint16(2, true);
+                    if (!isNewerSeq16(seq, lastRemoteInputSeq)) return;
+                    const delta = seqDiff16(seq, lastRemoteInputSeq);
+                    const maskPrev2 = view.getUint16(4, true);
+                    const maskPrev1 = view.getUint16(6, true);
+                    const maskCurr  = view.getUint16(8, true);
+                    lastRemoteInputSeq = seq;
+                    // Replay any missed intermediate transitions in exact chronological order!
+                    if (delta >= 3) {
+                        handleRemoteActions(playerIndex, bitmaskToActions(maskPrev2));
+                    }
+                    if (delta >= 2) {
+                        handleRemoteActions(playerIndex, bitmaskToActions(maskPrev1));
+                    }
+                    handleRemoteActions(playerIndex, bitmaskToActions(maskCurr));
+                } else if (pktType === 0x01 && view.byteLength >= 6) {
                     const { playerIndex, seq, actions } = decodeInputPacket(view);
                     if (!isNewerSeq16(seq, lastRemoteInputSeq)) return;
                     lastRemoteInputSeq = seq;
@@ -2776,10 +2837,96 @@ function syncVolumeUI() {
     });
 }
 
-// ── Input Capture, Relay & Synthetic Ruffle Injection ──
+// ── Input Capture, SOCD Cleaning, Relay & Synthetic Ruffle Injection ──
+const DIR_OPPOSITE = {
+    'UP': 'DOWN',
+    'DOWN': 'UP',
+    'LEFT': 'RIGHT',
+    'RIGHT': 'LEFT'
+};
+const DIRECTION_ACTIONS = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
+const ATTACK_SKILL_ACTIONS = new Set(['ATTACK', 'JUMP', 'DASH', 'FAR', 'SPECIAL', 'ASSIST']);
+
+// Track physical key hold states so SOCD (Simultaneous Opposite Cardinal Directions, e.g. W+S or A+D)
+// always gives priority to the newest direction pressed and cleanly restores if the opposite key is still held!
+const physActionHeld = {};
+const activeCodesByAction = {};
+ACTIONS.forEach(a => {
+    physActionHeld[a] = false;
+    activeCodesByAction[a] = new Set();
+});
+
+function applyLocalActionPress(stateObj, hudId, activeClass, act, isHostP1) {
+    const opp = DIR_OPPOSITE[act];
+    let changed = false;
+
+    // Last-Input Priority SOCD Cleaning: pressing S while W is held immediately releases W (and vice versa)
+    if (opp && stateObj[opp]) {
+        stateObj[opp] = false;
+        changed = true;
+        if (isHostP1) {
+            dispatchSyntheticKeyToRuffle(ACTION_TO_P1_SYNTHETIC_KEY[opp], 'keyup');
+        }
+    }
+    if (!stateObj[act]) {
+        stateObj[act] = true;
+        changed = true;
+    }
+    if (changed) {
+        updateHud(hudId, stateObj, activeClass);
+        broadcastMyActions(stateObj);
+    }
+}
+
+function applyLocalActionRelease(stateObj, hudId, activeClass, act, isHostP1) {
+    const opp = DIR_OPPOSITE[act];
+    let changed = false;
+
+    if (stateObj[act]) {
+        stateObj[act] = false;
+        changed = true;
+    }
+    // If the opposite cardinal direction key is still physically held down, restore it cleanly
+    if (opp && physActionHeld[opp] && !stateObj[opp]) {
+        stateObj[opp] = true;
+        changed = true;
+        if (isHostP1) {
+            dispatchSyntheticKeyToRuffle(ACTION_TO_P1_SYNTHETIC_KEY[opp], 'keydown');
+        }
+    }
+    if (changed) {
+        updateHud(hudId, stateObj, activeClass);
+        broadcastMyActions(stateObj);
+    }
+}
+
 function onWindowKeyDown(e) {
-    if (gameMode !== 'online') return;
+    if (!gameMode) return;
     if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    // Block OS key-repeat spam from flooding Ruffle or network state when holding a key
+    if (e.repeat && e.isTrusted) {
+        const isGameKey = !!(CODE_TO_GUEST_ACTION[e.code] || P2_NATIVE_CODES.has(e.code));
+        if (isGameKey) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        }
+        return;
+    }
+
+    if (gameMode === 'local') {
+        // In Local mode, still apply SOCD cleaning for P1 WASD so overlapping W+S or A+D never glitches moves
+        const act = CODE_TO_P1_ACTION[e.code];
+        if (act && e.isTrusted) {
+            activeCodesByAction[act].add(e.code);
+            physActionHeld[act] = true;
+            const opp = DIR_OPPOSITE[act];
+            if (opp && physActionHeld[opp]) {
+                dispatchSyntheticKeyToRuffle(ACTION_TO_P1_SYNTHETIC_KEY[opp], 'keyup');
+            }
+        }
+        return;
+    }
 
     if (myPlayerIndex === 1) {
         // Host: block physical P2 keys so Host only controls P1, while synthetic P2 events pass through
@@ -2793,22 +2940,18 @@ function onWindowKeyDown(e) {
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
                 e.preventDefault();
             }
-            if (!p1ActionState[act]) {
-                p1ActionState[act] = true;
-                updateHud('hudP1', p1ActionState, 'active-p1');
-                broadcastMyActions(p1ActionState);
-            }
+            activeCodesByAction[act].add(e.code);
+            physActionHeld[act] = true;
+            applyLocalActionPress(p1ActionState, 'hudP1', 'active-p1', act, true);
         }
     } else if (myPlayerIndex === 2) {
         // Guest: capture either WASD+JKLUIO or Arrows+Numpad1-6 and send as P2 actions to Host
         const act = CODE_TO_GUEST_ACTION[e.code];
         if (act) {
             e.preventDefault();
-            if (!p2ActionState[act]) {
-                p2ActionState[act] = true;
-                updateHud('hudP2', p2ActionState, 'active-p2');
-                broadcastMyActions(p2ActionState);
-            }
+            activeCodesByAction[act].add(e.code);
+            physActionHeld[act] = true;
+            applyLocalActionPress(p2ActionState, 'hudP2', 'active-p2', act, false);
         }
     }
 }
@@ -2816,8 +2959,21 @@ onWindowKeyDown.__bvnAppListener = true;
 window.addEventListener('keydown', onWindowKeyDown, true);
 
 function onWindowKeyUp(e) {
-    if (gameMode !== 'online') return;
+    if (!gameMode) return;
     if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    if (gameMode === 'local') {
+        const act = CODE_TO_P1_ACTION[e.code];
+        if (act && e.isTrusted) {
+            activeCodesByAction[act].delete(e.code);
+            physActionHeld[act] = activeCodesByAction[act].size > 0;
+            const opp = DIR_OPPOSITE[act];
+            if (!physActionHeld[act] && opp && physActionHeld[opp]) {
+                dispatchSyntheticKeyToRuffle(ACTION_TO_P1_SYNTHETIC_KEY[opp], 'keydown');
+            }
+        }
+        return;
+    }
 
     if (myPlayerIndex === 1) {
         if (e.isTrusted && P2_NATIVE_CODES.has(e.code)) {
@@ -2826,29 +2982,59 @@ function onWindowKeyUp(e) {
             return;
         }
         const act = CODE_TO_P1_ACTION[e.code];
-        if (act && p1ActionState[act]) {
-            p1ActionState[act] = false;
-            updateHud('hudP1', p1ActionState, 'active-p1');
-            broadcastMyActions(p1ActionState);
+        if (act) {
+            activeCodesByAction[act].delete(e.code);
+            physActionHeld[act] = activeCodesByAction[act].size > 0;
+            if (!physActionHeld[act]) {
+                applyLocalActionRelease(p1ActionState, 'hudP1', 'active-p1', act, true);
+            }
         }
     } else if (myPlayerIndex === 2) {
         const act = CODE_TO_GUEST_ACTION[e.code];
-        if (act && p2ActionState[act]) {
+        if (act) {
             e.preventDefault();
-            p2ActionState[act] = false;
-            updateHud('hudP2', p2ActionState, 'active-p2');
-            broadcastMyActions(p2ActionState);
+            activeCodesByAction[act].delete(e.code);
+            physActionHeld[act] = activeCodesByAction[act].size > 0;
+            if (!physActionHeld[act]) {
+                applyLocalActionRelease(p2ActionState, 'hudP2', 'active-p2', act, false);
+            }
         }
     }
 }
 onWindowKeyUp.__bvnAppListener = true;
 window.addEventListener('keyup', onWindowKeyUp, true);
 
+function releaseAllLocalKeys() {
+    ACTIONS.forEach(act => {
+        activeCodesByAction[act].clear();
+        physActionHeld[act] = false;
+    });
+    if (gameMode === 'online') {
+        const stateObj = myPlayerIndex === 1 ? p1ActionState : p2ActionState;
+        let anyHeld = false;
+        ACTIONS.forEach(act => {
+            if (stateObj[act]) {
+                stateObj[act] = false;
+                anyHeld = true;
+                if (myPlayerIndex === 1) {
+                    dispatchSyntheticKeyToRuffle(ACTION_TO_P1_SYNTHETIC_KEY[act], 'keyup');
+                }
+            }
+        });
+        if (anyHeld) {
+            updateHud(myPlayerIndex === 1 ? 'hudP1' : 'hudP2', stateObj, myPlayerIndex === 1 ? 'active-p1' : 'active-p2');
+            broadcastMyActions(stateObj);
+        }
+    }
+}
+window.addEventListener('blur', releaseAllLocalKeys);
+
 function broadcastMyActions(stateObj) {
     const seq = ++inputSeq;
     const actionsSnapshot = { ...stateObj };
+    recordLocalMaskTransition(actionsSnapshot);
     if (dataChannel && dataChannel.readyState === 'open') {
-        // Send 6-byte binary datagram immediately over Unreliable UDP DataChannel (ordered: false, maxRetransmits: 0)
+        // Send 10-byte transition-history datagram immediately over Unreliable UDP DataChannel (ordered: false, maxRetransmits: 0)
         // plus two rapid micro-bursts (+8ms and +20ms) so packet loss never drops a combo input or stalls subsequent inputs!
         sendUnreliableInput(myPlayerIndex, seq, actionsSnapshot);
         setTimeout(() => {
@@ -2868,44 +3054,130 @@ function broadcastMyActions(stateObj) {
     });
 }
 
-// Minimum key hold time (65ms = ~2 frames at 30 FPS) so rapid taps are guaranteed to be observed
-// by Bleach vs Naruto 2.6's onEnterFrame Key.isDown() polling.
-const MIN_HOLD_MS = 65;
+// 1-frame minimum hold (30ms at 30 FPS) for ultra-short taps, with:
+// 1. Instant directional release flush before any attack/skill key so releasing W/S + pressing J/I NEVER triggers an accidental W+J / S+I!
+// 2. Guaranteed keyup -> keydown separation when double-tapping / mashing the same key (D->D dash or J->J->J combo)!
+const MIN_HOLD_MS = 30;
+const REPRESS_GAP_MS = 28;
 const p2KeyDownTime = {};
 const p2ReleaseTimer = {};
+const p2RePressTimer = {};
+const p2RuffleKeyDown = {};
+
+function flushPendingP2DirectionReleases() {
+    DIRECTION_ACTIONS.forEach(dirAct => {
+        if (!p2ActionState[dirAct] && p2ReleaseTimer[dirAct]) {
+            clearTimeout(p2ReleaseTimer[dirAct]);
+            p2ReleaseTimer[dirAct] = null;
+            if (p2RuffleKeyDown[dirAct]) {
+                p2RuffleKeyDown[dirAct] = false;
+                dispatchSyntheticP2Key(dirAct, 'keyup');
+            }
+        }
+    });
+}
 
 function handleRemoteActions(fromPlayer, actions) {
     if (!actions) return;
 
     if (fromPlayer === 2 && myPlayerIndex === 1) {
-        // Host receives Guest (Player 2) logical actions -> inject synthetic P2 keys into Ruffle!
+        // First: if any new attack/skill or opposite direction is being pressed, immediately flush any
+        // artificially-held released direction keys so stale W/S/A/D never contaminates neutral J/U/I/K/L/O!
+        let hasNewAttackOrDir = false;
+        ACTIONS.forEach(act => {
+            if (!!actions[act] && !p2ActionState[act]) {
+                if (ATTACK_SKILL_ACTIONS.has(act) || DIR_OPPOSITE[act]) {
+                    hasNewAttackOrDir = true;
+                }
+            }
+        });
+        if (hasNewAttackOrDir) {
+            flushPendingP2DirectionReleases();
+        }
+
+        // Next: process all releases (keyup) BEFORE presses (keydown) so opposite directions never overlap
         ACTIONS.forEach(act => {
             const pressed = !!actions[act];
             const wasPressed = !!p2ActionState[act];
-            if (pressed && !wasPressed) {
-                if (p2ReleaseTimer[act]) {
-                    clearTimeout(p2ReleaseTimer[act]);
-                    p2ReleaseTimer[act] = null;
-                }
-                p2ActionState[act] = true;
-                p2KeyDownTime[act] = performance.now();
-                dispatchSyntheticP2Key(act, 'keydown');
-            } else if (!pressed && wasPressed) {
+            if (!pressed && wasPressed) {
                 p2ActionState[act] = false;
+                if (p2RePressTimer[act]) {
+                    clearTimeout(p2RePressTimer[act]);
+                    p2RePressTimer[act] = null;
+                }
                 const elapsed = performance.now() - (p2KeyDownTime[act] || 0);
-                if (elapsed < MIN_HOLD_MS) {
+                // Only hold for the remainder of 1 frame (30ms) if it's an attack/tap and no conflicting key is active
+                if (elapsed < MIN_HOLD_MS && !DIRECTION_ACTIONS.includes(act)) {
                     if (p2ReleaseTimer[act]) clearTimeout(p2ReleaseTimer[act]);
                     p2ReleaseTimer[act] = setTimeout(() => {
                         p2ReleaseTimer[act] = null;
-                        if (!p2ActionState[act]) {
+                        if (!p2ActionState[act] && p2RuffleKeyDown[act]) {
+                            p2RuffleKeyDown[act] = false;
                             dispatchSyntheticP2Key(act, 'keyup');
                         }
                     }, MIN_HOLD_MS - elapsed);
                 } else {
-                    dispatchSyntheticP2Key(act, 'keyup');
+                    if (p2ReleaseTimer[act]) {
+                        clearTimeout(p2ReleaseTimer[act]);
+                        p2ReleaseTimer[act] = null;
+                    }
+                    if (p2RuffleKeyDown[act]) {
+                        p2RuffleKeyDown[act] = false;
+                        dispatchSyntheticP2Key(act, 'keyup');
+                    }
                 }
             }
         });
+
+        // Finally: process all new presses (keydown)
+        ACTIONS.forEach(act => {
+            const pressed = !!actions[act];
+            const wasPressed = !!p2ActionState[act];
+            if (pressed && !wasPressed) {
+                p2ActionState[act] = true;
+
+                // Ensure opposite direction is immediately released in Ruffle (SOCD protection)
+                const opp = DIR_OPPOSITE[act];
+                if (opp && p2RuffleKeyDown[opp]) {
+                    if (p2ReleaseTimer[opp]) {
+                        clearTimeout(p2ReleaseTimer[opp]);
+                        p2ReleaseTimer[opp] = null;
+                    }
+                    p2RuffleKeyDown[opp] = false;
+                    dispatchSyntheticP2Key(opp, 'keyup');
+                }
+
+                // If this same key was STILL waiting on a delayed release from a previous tap (<30ms ago),
+                // release it immediately now and fire the new keydown after 1 frame (28ms) so Ruffle sees
+                // a distinct keyup -> keydown edge for rapid mashing (J->J->J) or double-tap dash (D->D)!
+                if (p2ReleaseTimer[act] || p2RuffleKeyDown[act]) {
+                    if (p2ReleaseTimer[act]) {
+                        clearTimeout(p2ReleaseTimer[act]);
+                        p2ReleaseTimer[act] = null;
+                    }
+                    p2RuffleKeyDown[act] = false;
+                    dispatchSyntheticP2Key(act, 'keyup');
+                    if (p2RePressTimer[act]) clearTimeout(p2RePressTimer[act]);
+                    p2RePressTimer[act] = setTimeout(() => {
+                        p2RePressTimer[act] = null;
+                        if (p2ActionState[act] && !p2RuffleKeyDown[act]) {
+                            p2RuffleKeyDown[act] = true;
+                            p2KeyDownTime[act] = performance.now();
+                            dispatchSyntheticP2Key(act, 'keydown');
+                        }
+                    }, REPRESS_GAP_MS);
+                } else {
+                    if (p2RePressTimer[act]) {
+                        clearTimeout(p2RePressTimer[act]);
+                        p2RePressTimer[act] = null;
+                    }
+                    p2RuffleKeyDown[act] = true;
+                    p2KeyDownTime[act] = performance.now();
+                    dispatchSyntheticP2Key(act, 'keydown');
+                }
+            }
+        });
+
         updateHud('hudP2', p2ActionState, 'active-p2');
     } else if (fromPlayer === 1 && myPlayerIndex === 2) {
         // Guest receives Host (Player 1) HUD state
@@ -2916,8 +3188,7 @@ function handleRemoteActions(fromPlayer, actions) {
     }
 }
 
-function dispatchSyntheticP2Key(action, eventType) {
-    const keyDef = ACTION_TO_P2_SYNTHETIC_KEY[action];
+function dispatchSyntheticKeyToRuffle(keyDef, eventType) {
     if (!keyDef || !rufflePlayer) return;
 
     // Force Ruffle's internal WASM `has_focus` flag to true before injecting key event
@@ -2947,14 +3218,23 @@ function dispatchSyntheticP2Key(action, eventType) {
     }
 }
 
+function dispatchSyntheticP2Key(action, eventType) {
+    dispatchSyntheticKeyToRuffle(ACTION_TO_P2_SYNTHETIC_KEY[action], eventType);
+}
+
 function releaseAllSyntheticP2Keys() {
     ACTIONS.forEach(act => {
         if (p2ReleaseTimer[act]) {
             clearTimeout(p2ReleaseTimer[act]);
             p2ReleaseTimer[act] = null;
         }
-        if (p2ActionState[act]) {
-            p2ActionState[act] = false;
+        if (p2RePressTimer[act]) {
+            clearTimeout(p2RePressTimer[act]);
+            p2RePressTimer[act] = null;
+        }
+        p2ActionState[act] = false;
+        if (p2RuffleKeyDown[act]) {
+            p2RuffleKeyDown[act] = false;
             dispatchSyntheticP2Key(act, 'keyup');
         }
     });
